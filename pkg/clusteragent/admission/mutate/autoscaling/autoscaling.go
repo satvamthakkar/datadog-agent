@@ -9,6 +9,8 @@
 package autoscaling
 
 import (
+	"sync"
+
 	admiv1 "k8s.io/api/admission/v1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -35,11 +37,17 @@ type Webhook struct {
 	resources       map[string][]string
 	operations      []admissionregistrationv1.OperationType
 	matchConditions []admissionregistrationv1.MatchCondition
-	patcher         workload.PodPatcher
+
+	// the patcher is installed lazily via SetPatcher because the workload
+	// autoscaling stack starts lazily when the first DatadogPodAutoscaler is
+	// detected
+	patcherMutex sync.RWMutex
+	patcher      workload.PodPatcher
 }
 
-// NewWebhook returns a new Webhook
-func NewWebhook(patcher workload.PodPatcher, datadogConfig config.Component) *Webhook {
+// NewWebhook returns a new Webhook with no patcher installed. Call SetPatcher
+// once the workload autoscaling stack is up.
+func NewWebhook(datadogConfig config.Component) *Webhook {
 	return &Webhook{
 		name:            webhookName,
 		isEnabled:       datadogConfig.GetBool("autoscaling.workload.enabled"),
@@ -47,8 +55,14 @@ func NewWebhook(patcher workload.PodPatcher, datadogConfig config.Component) *We
 		resources:       map[string][]string{"": {"pods"}},
 		operations:      []admissionregistrationv1.OperationType{admissionregistrationv1.Create},
 		matchConditions: []admissionregistrationv1.MatchCondition{},
-		patcher:         patcher,
 	}
+}
+
+// SetPatcher installs the PodPatcher used to apply recommendations.
+func (w *Webhook) SetPatcher(p workload.PodPatcher) {
+	w.patcherMutex.Lock()
+	defer w.patcherMutex.Unlock()
+	w.patcher = p
 }
 
 // Name returns the name of the webhook
@@ -111,5 +125,11 @@ func (w *Webhook) WebhookFunc() admission.WebhookFunc {
 
 // updateResources finds the owner of a pod, calls the recommender to retrieve the recommended CPU and Memory requests
 func (w *Webhook) updateResources(pod *corev1.Pod, _ string, _ dynamic.Interface) (bool, error) {
-	return w.patcher.ApplyRecommendations(pod)
+	w.patcherMutex.RLock()
+	p := w.patcher
+	w.patcherMutex.RUnlock()
+	if p == nil {
+		return false, nil
+	}
+	return p.ApplyRecommendations(pod)
 }
