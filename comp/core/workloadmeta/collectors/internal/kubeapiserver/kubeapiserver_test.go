@@ -8,101 +8,132 @@
 package kubeapiserver
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/fx"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
 
+	"github.com/DataDog/datadog-agent/comp/core"
 	"github.com/DataDog/datadog-agent/comp/core/config"
+	workloadmeta "github.com/DataDog/datadog-agent/comp/core/workloadmeta/def"
+	workloadmetafxmock "github.com/DataDog/datadog-agent/comp/core/workloadmeta/fx-mock"
+	workloadmetamock "github.com/DataDog/datadog-agent/comp/core/workloadmeta/mock"
+	"github.com/DataDog/datadog-agent/pkg/clusteragent/autoscaling/autoscalinggate"
+	"github.com/DataDog/datadog-agent/pkg/util/fxutil"
 )
 
-func TestStoreGenerators(t *testing.T) {
-	// Define tests
+func TestShouldHaveDeploymentStore(t *testing.T) {
 	tests := []struct {
-		name                    string
-		cfg                     map[string]interface{}
-		expectedStoresGenerator []storeGenerator
+		name     string
+		cfg      map[string]interface{}
+		expected bool
 	}{
 		{
-			name: "All configurations disabled",
+			name: "language detection disabled",
 			cfg: map[string]interface{}{
-				"cluster_agent.collect_kubernetes_tags": false,
-				"language_detection.reporting.enabled":  false,
-				"language_detection.enabled":            false,
+				"language_detection.enabled": false,
 			},
-			expectedStoresGenerator: []storeGenerator{},
+			expected: false,
 		},
 		{
-			name: "All configurations disabled",
+			name: "language detection enabled but reporting disabled",
 			cfg: map[string]interface{}{
-				"cluster_agent.collect_kubernetes_tags": false,
-				"language_detection.reporting.enabled":  false,
-				"language_detection.enabled":            true,
+				"language_detection.enabled":           true,
+				"language_detection.reporting.enabled": false,
 			},
-			expectedStoresGenerator: []storeGenerator{},
+			expected: false,
 		},
 		{
-			name: "Kubernetes tags enabled",
+			name: "language detection and reporting enabled",
 			cfg: map[string]interface{}{
-				"cluster_agent.collect_kubernetes_tags": true,
-				"language_detection.reporting.enabled":  false,
-				"language_detection.enabled":            true,
+				"language_detection.reporting.enabled": true,
+				"language_detection.enabled":           true,
 			},
-			expectedStoresGenerator: []storeGenerator{newPodStore},
-		},
-		{
-			name: "Language detection enabled",
-			cfg: map[string]interface{}{
-				"cluster_agent.collect_kubernetes_tags": false,
-				"language_detection.reporting.enabled":  true,
-				"language_detection.enabled":            true,
-			},
-			expectedStoresGenerator: []storeGenerator{newDeploymentStore},
-		},
-		{
-			name: "Language detection enabled",
-			cfg: map[string]interface{}{
-				"cluster_agent.collect_kubernetes_tags": false,
-				"language_detection.reporting.enabled":  true,
-				"language_detection.enabled":            false,
-			},
-			expectedStoresGenerator: []storeGenerator{},
-		},
-		{
-			name: "All configurations enabled",
-			cfg: map[string]interface{}{
-				"cluster_agent.collect_kubernetes_tags": true,
-				"language_detection.reporting.enabled":  true,
-				"language_detection.enabled":            true,
-			},
-			expectedStoresGenerator: []storeGenerator{newPodStore, newDeploymentStore},
+			expected: true,
 		},
 	}
 
-	// Run test for each testcase
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.NewMockWithOverrides(t, tt.cfg)
-			expectedStores := collectResultStoreGenerator(tt.expectedStoresGenerator, cfg)
-			stores := collectResultStoreGenerator(storeGenerators(cfg), cfg)
-
-			assert.Equal(t, expectedStores, stores)
+			assert.Equal(t, tt.expected, shouldHaveDeploymentStore(cfg))
 		})
 	}
 }
 
-func collectResultStoreGenerator(funcs []storeGenerator, config config.Reader) []*reflectorStore {
-	var stores []*reflectorStore
-	client := fakeclientset.NewClientset()
-	for _, f := range funcs {
-		_, s := f(nil, nil, config, client)
-		stores = append(stores, s)
+func TestShouldStartPodStoreEagerly(t *testing.T) {
+	tests := []struct {
+		name                 string
+		cfg                  map[string]interface{}
+		autoscalingGateWired bool
+		expected             bool
+	}{
+		{
+			name:     "no triggers",
+			cfg:      map[string]interface{}{},
+			expected: false,
+		},
+		{
+			name: "kubernetes tags collection",
+			cfg: map[string]interface{}{
+				"cluster_agent.collect_kubernetes_tags": true,
+			},
+			expected: true,
+		},
+		{
+			name: "spot scheduling",
+			cfg: map[string]interface{}{
+				"autoscaling.cluster.spot.enabled": true,
+			},
+			expected: true,
+		},
+		{
+			name: "pod labels as tags",
+			cfg: map[string]interface{}{
+				"kubernetes_pod_labels_as_tags": map[string]string{"app": "kube_app"},
+			},
+			expected: true,
+		},
+		{
+			name: "pod annotations as tags",
+			cfg: map[string]interface{}{
+				"kubernetes_pod_annotations_as_tags": map[string]string{"team": "kube_team"},
+			},
+			expected: true,
+		},
+		{
+			name: "workload autoscaling enabled without gate falls back to eager",
+			cfg: map[string]interface{}{
+				"autoscaling.workload.enabled": true,
+			},
+			autoscalingGateWired: false,
+			expected:             true,
+		},
+		{
+			name: "workload autoscaling enabled with gate stays lazy",
+			cfg: map[string]interface{}{
+				"autoscaling.workload.enabled": true,
+			},
+			autoscalingGateWired: true,
+			expected:             false,
+		},
 	}
-	return stores
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.NewMockWithOverrides(t, tt.cfg)
+			assert.Equal(t, tt.expected, shouldStartPodStoreEagerly(cfg, tt.autoscalingGateWired))
+		})
+	}
 }
 
 func Test_metadataCollectionGVRs_WithFunctionalDiscovery(t *testing.T) {
@@ -566,4 +597,101 @@ func TestResourcesWithMetadataCollectionEnabled(t *testing.T) {
 			assert.ElementsMatch(t, test.expectedResources, resourcesWithMetadataCollectionEnabled(cfg))
 		})
 	}
+}
+
+func TestStartPodStoreOnGate(t *testing.T) {
+	testPodUID := "test-pod-uid"
+
+	client := fakeclientset.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			UID:       types.UID(testPodUID),
+		},
+	})
+
+	gate := autoscalinggate.New()
+
+	wmeta := fxutil.Test[workloadmetamock.Mock](t, fx.Options(
+		core.MockBundle(),
+		workloadmetafxmock.MockModule(workloadmeta.NewParams()),
+	))
+
+	testCollector := &collector{
+		id:              collectorID,
+		catalog:         workloadmeta.ClusterAgent,
+		config:          wmeta.GetConfig(),
+		autoscalingGate: gate,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		testCollector.startPodStoreOnGate(ctx, wmeta, client, newPodStoreWithTypedClient)
+		close(done)
+	}()
+
+	// Before enabling the gate, no pod should appear in workloadmeta.
+	assert.Never(t, func() bool {
+		_, err := wmeta.GetKubernetesPod(testPodUID)
+		return err == nil
+	}, 100*time.Millisecond, 20*time.Millisecond)
+
+	gate.Enable()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startPodStoreOnGate did not return after gate enabled")
+	}
+
+	// The pod reflector should eventually populate workloadmeta after enabling
+	// the gate.
+	require.Eventually(t, func() bool {
+		_, err := wmeta.GetKubernetesPod(testPodUID)
+		return err == nil
+	}, 10*time.Second, 100*time.Millisecond)
+}
+
+// TestMarkPodCollectionSyncedWhenReady covers the eager-pod-store path: when
+// the pod store starts for non-autoscaling reasons (kubernetes_pod_labels_as_tags,
+// collect_kubernetes_tags, etc.) but the autoscaling gate is wired, we must
+// still signal MarkPodCollectionSynced once the cache is ready, otherwise the
+// workload autoscaling stack waits on the gate forever.
+func TestMarkPodCollectionSyncedWhenReady(t *testing.T) {
+	client := fakeclientset.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			UID:       types.UID("test-pod-uid"),
+		},
+	})
+
+	gate := autoscalinggate.New()
+
+	wmeta := fxutil.Test[workloadmetamock.Mock](t, fx.Options(
+		core.MockBundle(),
+		workloadmetafxmock.MockModule(workloadmeta.NewParams()),
+	))
+
+	testCollector := &collector{
+		id:              collectorID,
+		catalog:         workloadmeta.ClusterAgent,
+		config:          wmeta.GetConfig(),
+		autoscalingGate: gate,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reflector, store := newPodStoreWithTypedClient(ctx, wmeta, wmeta.GetConfig(), client)
+	go reflector.Run(ctx.Done())
+
+	go testCollector.markPodCollectionSyncedWhenReady(ctx, store)
+
+	syncedCtx, syncedCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer syncedCancel()
+	assert.True(t, gate.WaitForPodCollectionSynced(syncedCtx), "MarkPodCollectionSynced was not called")
 }

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/DataDog/datadog-agent/pkg/util/kubernetes/apiserver/common"
 	"go.uber.org/fx"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -22,9 +21,11 @@ import (
 
 	"github.com/DataDog/datadog-agent/comp/core/config"
 	workloadmeta "github.com/DataDog/datadog-agent/comp/core/workloadmeta/def"
+	"github.com/DataDog/datadog-agent/pkg/clusteragent/autoscaling/autoscalinggate"
 	configutils "github.com/DataDog/datadog-agent/pkg/config/utils"
 	"github.com/DataDog/datadog-agent/pkg/status/health"
 	"github.com/DataDog/datadog-agent/pkg/util/kubernetes/apiserver"
+	"github.com/DataDog/datadog-agent/pkg/util/kubernetes/apiserver/common"
 	"github.com/DataDog/datadog-agent/pkg/util/log"
 )
 
@@ -38,17 +39,26 @@ type dependencies struct {
 	fx.In
 
 	Config config.Component
+
+	// AutoscalingGate is optional because this collector is pulled into many
+	// binaries via the shared wmeta catalog, but it only runs in the DCA, which
+	// is the only binary that supplies the gate.
+	AutoscalingGate *autoscalinggate.Gate `optional:"true"`
 }
 
 // storeGenerator returns a new store specific to a given resource
 type storeGenerator func(context.Context, workloadmeta.Component, config.Reader, kubernetes.Interface) (*cache.Reflector, *reflectorStore)
 
-func shouldHavePodStore(cfg config.Reader) bool {
+func shouldStartPodStoreEagerly(cfg config.Reader, autoscalingGateWired bool) bool {
 	metadataAsTags := configutils.GetMetadataAsTags(cfg)
 	hasPodLabelsAsTags := len(metadataAsTags.GetPodLabelsAsTags()) > 0
 	hasPodAnnotationsAsTags := len(metadataAsTags.GetPodAnnotationsAsTags()) > 0
 
-	return cfg.GetBool("cluster_agent.collect_kubernetes_tags") || cfg.GetBool("autoscaling.workload.enabled") || cfg.GetBool("autoscaling.cluster.spot.enabled") || hasPodLabelsAsTags || hasPodAnnotationsAsTags
+	return cfg.GetBool("cluster_agent.collect_kubernetes_tags") ||
+		cfg.GetBool("autoscaling.cluster.spot.enabled") ||
+		hasPodLabelsAsTags ||
+		hasPodAnnotationsAsTags ||
+		(cfg.GetBool("autoscaling.workload.enabled") && !autoscalingGateWired)
 }
 
 func shouldHaveDeploymentStore(cfg config.Reader) bool {
@@ -57,20 +67,6 @@ func shouldHaveDeploymentStore(cfg config.Reader) bool {
 	hasDeploymentsAnnotationsAsTags := len(metadataAsTags.GetResourcesAnnotationsAsTags()["deployments.apps"]) > 0
 
 	return cfg.GetBool("language_detection.enabled") && cfg.GetBool("language_detection.reporting.enabled") || hasDeploymentsLabelsAsTags || hasDeploymentsAnnotationsAsTags
-}
-
-func storeGenerators(cfg config.Reader) []storeGenerator {
-	var generators []storeGenerator
-
-	if shouldHavePodStore(cfg) {
-		generators = append(generators, newPodStore)
-	}
-
-	if shouldHaveDeploymentStore(cfg) {
-		generators = append(generators, newDeploymentStore)
-	}
-
-	return generators
 }
 
 func metadataCollectionGVRs(cfg config.Reader, discoveryClient discovery.DiscoveryInterface) ([]schema.GroupVersionResource, error) {
@@ -170,18 +166,20 @@ func resourcesForAPMConfig(cfg config.Reader) []string {
 }
 
 type collector struct {
-	id      string
-	catalog workloadmeta.AgentType
-	config  config.Reader
+	id              string
+	catalog         workloadmeta.AgentType
+	config          config.Reader
+	autoscalingGate *autoscalinggate.Gate
 }
 
 // NewCollector returns a kubeapiserver CollectorProvider that instantiates its colletor
 func NewCollector(deps dependencies) (workloadmeta.CollectorProvider, error) {
 	return workloadmeta.CollectorProvider{
 		Collector: &collector{
-			id:      collectorID,
-			catalog: workloadmeta.ClusterAgent,
-			config:  deps.Config,
+			id:              collectorID,
+			catalog:         workloadmeta.ClusterAgent,
+			config:          deps.Config,
+			autoscalingGate: deps.AutoscalingGate,
 		},
 	}, nil
 }
@@ -218,8 +216,25 @@ func (c *collector) Start(ctx context.Context, wlmetaStore workloadmeta.Componen
 		}
 	}
 
-	for _, storeBuilder := range storeGenerators(c.config) {
-		reflector, store := storeBuilder(ctx, wlmetaStore, c.config, client)
+	gateWired := c.autoscalingGate != nil
+	needsGateSync := gateWired && c.config.GetBool("autoscaling.workload.enabled")
+
+	// Pod store handling
+	if shouldStartPodStoreEagerly(c.config, gateWired) {
+		reflector, store := newPodStore(ctx, wlmetaStore, c.config, client)
+		objectStores = append(objectStores, store)
+		go reflector.Run(ctx.Done())
+		if needsGateSync {
+			go c.markPodCollectionSyncedWhenReady(ctx, store)
+		}
+	} else if needsGateSync {
+		// Defer starting the pod reflector until the first DatadogPodAutoscaler
+		// or DatadogPodAutoscalerClusterProfile has been deployed.
+		go c.startPodStoreOnGate(ctx, wlmetaStore, client, newPodStore)
+	}
+
+	if shouldHaveDeploymentStore(c.config) {
+		reflector, store := newDeploymentStore(ctx, wlmetaStore, c.config, client)
 		objectStores = append(objectStores, store)
 		go reflector.Run(ctx.Done())
 	}
@@ -239,6 +254,32 @@ func (c *collector) Start(ctx context.Context, wlmetaStore workloadmeta.Componen
 	go runStartupCheck(ctx, objectStores)
 
 	return nil
+}
+
+// startPodStoreOnGate blocks until either the gate is enabled (signalling that
+// at least one DatadogPodAutoscaler or DatadogPodAutoscalerClusterProfile has
+// been deployed) or the context is cancelled. On gate enable, it starts the pod
+// reflector.
+func (c *collector) startPodStoreOnGate(ctx context.Context, wlmetaStore workloadmeta.Component, client kubernetes.Interface, newStore storeGenerator) {
+	if !c.autoscalingGate.WaitForEnable(ctx) {
+		return
+	}
+
+	log.Debug("First DatadogPodAutoscaler or DatadogPodAutoscalerClusterProfile observed. Starting workloadmeta pod reflector lazily")
+	reflector, store := newStore(ctx, wlmetaStore, c.config, client)
+	go reflector.Run(ctx.Done())
+
+	c.markPodCollectionSyncedWhenReady(ctx, store)
+}
+
+// markPodCollectionSyncedWhenReady waits for the pod store's cache to sync
+// then signals the autoscaling gate. The workload autoscaling stack waits on
+// this signal before starting.
+func (c *collector) markPodCollectionSyncedWhenReady(ctx context.Context, store *reflectorStore) {
+	if !cache.WaitForCacheSync(ctx.Done(), store.HasSynced) {
+		return
+	}
+	c.autoscalingGate.MarkPodCollectionSynced()
 }
 
 func (c *collector) Pull(_ context.Context) error {
