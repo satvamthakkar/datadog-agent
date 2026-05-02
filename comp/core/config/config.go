@@ -6,8 +6,10 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	"go.uber.org/fx"
 
@@ -104,8 +106,12 @@ func (c *cfg) Warnings() *pkgconfigmodel.Warnings {
 	return c.warnings
 }
 
+func (c *cfg) StartTime() time.Time {
+	return c.Config.StartTime()
+}
+
 // fillFlare add the Configuration files to flares.
-func (c *cfg) fillFlare(fb flaretypes.FlareBuilder) error {
+func (c *cfg) fillFlare(_ context.Context, fb flaretypes.FlareBuilder) error {
 	if mainConfpath := c.ConfigFileUsed(); mainConfpath != "" {
 		confDir := filepath.Dir(mainConfpath)
 
