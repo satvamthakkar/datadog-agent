@@ -286,12 +286,6 @@ func (r *secretResolver) Configure(params secrets.ConfigParams) {
 	r.backendCommand = params.Command
 
 	r.multiBackends = params.MultiBackends
-	for name := range r.multiBackends {
-		if name == "default" {
-			log.Warnf("multi_secret_backends: backend name \"default\" is reserved; this entry will be ignored")
-			delete(r.multiBackends, name)
-		}
-	}
 	r.embeddedBackendPermissiveRights = false
 
 	if r.backendCommand != "" && r.backendType != "" {
