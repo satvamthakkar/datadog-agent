@@ -93,7 +93,7 @@ type secretResolver struct {
 
 	backendType                     string
 	backendConfig                   map[string]interface{}
-	backendConfigs                  map[string]interface{}
+	multiBackends                   map[string]secrets.SecretBackendConfig
 	backendCommand                  string
 	backendArguments                []string
 	backendTimeout                  int
@@ -283,17 +283,25 @@ func (r *secretResolver) registerSecretOrigin(handle string, origin string, path
 func (r *secretResolver) Configure(params secrets.ConfigParams) {
 	r.backendType = params.Type
 	r.backendConfig = params.Config
-	r.backendConfigs = params.Backends
+	r.multiBackends = params.MultiBackends
 	r.backendCommand = params.Command
 	r.embeddedBackendPermissiveRights = false
+
 	if r.backendCommand != "" && r.backendType != "" {
 		log.Warnf("Both secret_backend_command and secret_backend_type are set. secret_backend_command takes precedence; secret_backend_type is ignored. To use native backend (aws.secrets, hashicorp.vault, etc.), remove secret_backend_command from datadog.yaml. Docs: %s", secretsManagementDocsURL)
 	}
-	if r.backendType != "" && len(r.backendConfigs) > 0 && r.backendCommand == "" {
+	// Cases 5 and 7: secret_backend_command + multi_secret_backends — command wins, multiBackends ignored.
+	if r.backendCommand != "" && r.multiBackends != nil {
+		log.Warnf("Both secret_backend_command and multi_secret_backends are set. secret_backend_command takes precedence; multi_secret_backends is ignored. To use multi_secret_backends and ENC[backendID::secretKey] routing, remove secret_backend_command from datadog.yaml. Docs: %s", secretsManagementDocsURL)
+		r.multiBackends = nil
+	}
+	// Case 6: secret_backend_type + multi_secret_backends (no command) — type wins, multiBackends ignored.
+	if r.backendType != "" && r.multiBackends != nil && r.backendCommand == "" {
 		log.Warnf("Both secret_backend_type and multi_secret_backends are set. secret_backend_type takes precedence; multi_secret_backends is ignored. To use multi_secret_backends and ENC[backendID::secretKey] routing, remove secret_backend_type from datadog.yaml. Docs: %s", secretsManagementDocsURL)
+		r.multiBackends = nil
 	}
 	// use the embedded connector if a backend type or named backends are configured and no explicit command is set
-	if (r.backendType != "" || len(r.backendConfigs) > 0) && r.backendCommand == "" {
+	if (r.backendType != "" || r.multiBackends != nil) && r.backendCommand == "" {
 		if runtime.GOOS == "windows" {
 			r.backendCommand = filepath.Join(
 				defaultpaths.GetEmbeddedBinPath(),
@@ -432,9 +440,13 @@ func (r *secretResolver) SubscribeToChanges(cb secrets.SecretChangeCallback) {
 func (r *secretResolver) shouldResolvedSecret(handle string, origin string, imageName string, kubeNamespace string) bool {
 	var secretNamespace string
 
-	// Strip the backendID:: prefix (e.g. "prodk8s::") before parsing namespace formats
-	// so that ENC[prodk8s::namespace1/secret;key] correctly extracts "namespace1".
-	_, secretKey := splitSecretHandle(handle)
+	// When multi_secret_backends is in use the handle always has a backendID:: prefix;
+	// strip it before parsing the Kubernetes namespace so "prodk8s::ns/secret;key"
+	// extracts namespace "ns", not "prodk8s::ns".
+	secretKey := handle
+	if r.multiBackends != nil {
+		_, secretKey = splitSecretHandle(handle)
+	}
 
 	// format: k8s_secret@namespace/secret-name/key
 	if secretName, found := strings.CutPrefix(secretKey, "k8s_secret@"); found && kubeNamespace != "" {
@@ -545,25 +557,24 @@ func (r *secretResolver) Resolve(data []byte, origin string, imageName string, k
 	var resolveErr error
 	if len(newHandles) != 0 {
 		var secretResponse map[string]string
-		var handleErrors map[string]error
+		var fetchErr error
 		if r.fetchHookFunc != nil {
-			// hook used only for tests (old signature: single error applied to all handles)
-			var err error
-			secretResponse, err = r.fetchHookFunc(newHandles)
-			if err != nil {
-				handleErrors = make(map[string]error, len(newHandles))
-				for _, h := range newHandles {
-					handleErrors[h] = err
-				}
-			}
+			secretResponse, fetchErr = r.fetchHookFunc(newHandles)
 		} else {
-			secretResponse, handleErrors = r.fetchSecret(newHandles)
+			secretResponse, fetchErr = r.fetchSecret(newHandles)
 		}
-		if len(handleErrors) > 0 {
-			for handle, herr := range handleErrors {
-				r.unresolvedSecrets[fmt.Sprintf("'%s' from %s: %s", handle, origin, herr)] = struct{}{}
+		if fetchErr != nil {
+			// Unwrap per-handle errors from errors.Join so each appears as its own
+			// bullet in the 'agent secret' status output.
+			type multiErr interface{ Unwrap() []error }
+			if joined, ok := fetchErr.(multiErr); ok {
+				for _, e := range joined.Unwrap() {
+					r.unresolvedSecrets[fmt.Sprintf("'%s' %s", origin, e)] = struct{}{}
+				}
+			} else {
+				r.unresolvedSecrets[fmt.Sprintf("from %s: %s", origin, fetchErr)] = struct{}{}
 			}
-			resolveErr = fmt.Errorf("could not resolve %d secret handle(s), see 'agent secret' for details", len(handleErrors))
+			resolveErr = fmt.Errorf("could not resolve secret handle(s), see 'agent secret' for details")
 		}
 
 		w.Resolver = func(path []string, value string) (string, error) {
@@ -791,16 +802,8 @@ func (r *secretResolver) performRefresh() (string, error) {
 			return "", err
 		}
 	} else {
-		var handleErrors map[string]error
-		secretResponse, handleErrors = r.fetchSecret(newHandles)
-		if len(handleErrors) > 0 {
-			errParts := make([]string, 0, len(handleErrors))
-			for h, e := range handleErrors {
-				errParts = append(errParts, fmt.Sprintf("handle %q: %s", h, e))
-			}
-			// Don't return early — apply successfully fetched secrets before reporting the error.
-			refreshErr = fmt.Errorf("%s", strings.Join(errParts, "; "))
-		}
+		// Don't return early on error — apply successfully fetched secrets before reporting it.
+		secretResponse, refreshErr = r.fetchSecret(newHandles)
 	}
 
 	var auditRecordErr error
@@ -914,10 +917,12 @@ func (r *secretResolver) getDebugInfo(stats map[string]interface{}, includeVersi
 	stats["backendType"] = r.backendType
 	stats["embeddedSecretBackend"] = r.embeddedBackendPermissiveRights
 
-	// executableVersion: optional --version probe for status/flare (unset on failure).
+	// executableVersion: optional --version probe for status/flare.
 	if includeVersion {
 		if version, err := r.fetchSecretBackendVersion(); err == nil {
 			stats["executableVersion"] = strings.TrimSpace(version)
+		} else {
+			stats["executableVersion"] = "version info not found"
 		}
 	}
 

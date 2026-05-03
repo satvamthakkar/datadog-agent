@@ -130,7 +130,7 @@ func (r *secretResolver) fetchSecretBackendVersion() (string, error) {
 	}
 
 	// Only get version when secret_backend_type or multi_secret_backends is used
-	if r.backendType == "" && len(r.backendConfigs) == 0 {
+	if r.backendType == "" && r.multiBackends == nil {
 		return "", errors.New("version only supported when secret_backend_type or multi_secret_backends is configured")
 	}
 
@@ -176,8 +176,8 @@ func (r *secretResolver) fetchSecretBackendVersion() (string, error) {
 	return strings.TrimSpace(stdout.buf.String()), nil
 }
 
-// splitSecretHandle splits on "::" into (backendID, secretKey). Used for multi_secret_backends routing
-// when secret_backend_type is unset; "::" avoids ambiguity with single-colon paths (e.g. vault URIs).
+// splitSecretHandle splits on "::" into (backendID, secretKey). Used only when
+// multi_secret_backends is set; "::" avoids ambiguity with single-colon paths (e.g. vault URIs).
 func splitSecretHandle(handle string) (backendID, secretKey string) {
 	const delim = "::"
 	idx := strings.Index(handle, delim)
@@ -189,37 +189,30 @@ func splitSecretHandle(handle string) (backendID, secretKey string) {
 
 // resolveBackendConfig returns the type, config, and timeout for backendID in multi_secret_backends.
 // When only multi_secret_backends is set (no secret_backend_type), backendID "" (unprefixed ENC[...]) is rejected.
-// When secret_backend_type is set, fetchSecret passes backendID "" and uses the top-level type only
-// (multi_secret_backends is ignored for routing).
 // Named backends use the global secret_backend_timeout (r.backendTimeout).
 func (r *secretResolver) resolveBackendConfig(backendID string) (string, map[string]interface{}, int, error) {
 	if backendID == "" {
-		if len(r.backendConfigs) > 0 && r.backendType == "" {
+		if r.multiBackends != nil && r.backendType == "" {
 			return "", nil, 0, errors.New("unknown backend")
 		}
 		return r.backendType, r.backendConfig, r.backendTimeout, nil
 	}
-	raw, ok := r.backendConfigs[backendID]
+	entry, ok := r.multiBackends[backendID]
 	if !ok {
 		return "", nil, 0, fmt.Errorf("unknown backend %q", backendID)
 	}
-	entry, ok := raw.(map[string]interface{})
-	if !ok {
-		return "", nil, 0, fmt.Errorf("invalid config for backend %q", backendID)
-	}
-	bType, _ := entry["type"].(string)
-	bConfig, _ := entry["config"].(map[string]interface{})
+	bConfig := entry.Config
 	if bConfig == nil {
 		bConfig = make(map[string]interface{})
 	}
-	return bType, bConfig, r.backendTimeout, nil
+	return entry.Type, bConfig, r.backendTimeout, nil
 }
 
 // fetchSecret groups the provided handles by backend, calls fetchSingleBackend once per group, and
-// merges results keyed by the original handles. Per-handle errors are returned in the second map.
-// When secret_backend_type is set, every inner handle string is sent to that backend as the secret key
-// (ENC[foo:bar] → "foo:bar", ENC[baz::qux] → "baz::qux"); multi_secret_backends is not used for routing.
-func (r *secretResolver) fetchSecret(handles []string) (map[string]string, map[string]error) {
+// merges results keyed by the original handles. When multi_secret_backends is nil (single-backend
+// mode), every handle is sent as-is to the configured backend; otherwise the first ";" delimits
+// the backendID from the secret key (ENC[backendID;secretKey]).
+func (r *secretResolver) fetchSecret(handles []string) (map[string]string, error) {
 	type group struct {
 		backendType    string
 		backendConfig  map[string]interface{}
@@ -232,7 +225,7 @@ func (r *secretResolver) fetchSecret(handles []string) (map[string]string, map[s
 	groups := map[string]*group{}
 	for _, handle := range handles {
 		var backendID, secretKey string
-		if r.backendType != "" {
+		if r.multiBackends == nil {
 			backendID, secretKey = "", handle
 		} else {
 			backendID, secretKey = splitSecretHandle(handle)
@@ -246,24 +239,18 @@ func (r *secretResolver) fetchSecret(handles []string) (map[string]string, map[s
 	}
 
 	result := make(map[string]string, len(handles))
-	var handleErrors map[string]error
+	var errs []error
 	for _, g := range groups {
 		if g.cfgErr != nil {
-			if handleErrors == nil {
-				handleErrors = make(map[string]error)
-			}
 			for _, h := range g.origHandles {
-				handleErrors[h] = fmt.Errorf("handle %q: %s", h, g.cfgErr)
+				errs = append(errs, fmt.Errorf("handle %q: %w", h, g.cfgErr))
 			}
 			continue
 		}
 		res, perHandleErrs, globalErr := r.fetchSingleBackend(g.backendType, g.backendConfig, g.backendTimeout, g.keys)
 		if globalErr != nil {
-			if handleErrors == nil {
-				handleErrors = make(map[string]error)
-			}
-			for _, h := range g.origHandles {
-				handleErrors[h] = globalErr
+			for range g.origHandles {
+				errs = append(errs, globalErr)
 			}
 			continue
 		}
@@ -271,14 +258,11 @@ func (r *secretResolver) fetchSecret(handles []string) (map[string]string, map[s
 			if val, ok := res[key]; ok {
 				result[g.origHandles[i]] = val
 			} else if err, ok := perHandleErrs[key]; ok {
-				if handleErrors == nil {
-					handleErrors = make(map[string]error)
-				}
-				handleErrors[g.origHandles[i]] = err
+				errs = append(errs, fmt.Errorf("handle %q: %w", g.origHandles[i], err))
 			}
 		}
 	}
-	return result, handleErrors
+	return result, errors.Join(errs...)
 }
 
 // fetchSingleBackend calls the secret backend command for a single backend type/config.

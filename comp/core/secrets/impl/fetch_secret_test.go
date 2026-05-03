@@ -231,10 +231,10 @@ func TestFetchSecretMissingSecret(t *testing.T) {
 	secrets := []string{"handle1", "handle2"}
 	resolver := newEnabledSecretResolver(tel)
 	resolver.commandHookFunc = func(string) ([]byte, error) { return []byte("{}"), nil }
-	_, handleErrors := resolver.fetchSecret(secrets)
-	assert.NotEmpty(t, handleErrors)
-	assert.Contains(t, handleErrors["handle1"].Error(), "secret handle 'handle1' was not resolved by the secret_backend_command")
-	assert.Contains(t, handleErrors["handle1"].Error(), secretsManagementDocsURL)
+	_, err := resolver.fetchSecret(secrets)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "secret handle 'handle1' was not resolved by the secret_backend_command")
+	assert.Contains(t, err.Error(), secretsManagementDocsURL)
 	checkErrorCountMetric(t, tel, 1, "missing", "handle1")
 }
 
@@ -244,9 +244,9 @@ func TestFetchSecretErrorForHandle(t *testing.T) {
 	resolver.commandHookFunc = func(string) ([]byte, error) {
 		return []byte("{\"handle1\":{\"value\": null, \"error\": \"some error\"}}"), nil
 	}
-	_, handleErrors := resolver.fetchSecret([]string{"handle1"})
-	assert.NotEmpty(t, handleErrors)
-	assert.Equal(t, "an error occurred while resolving 'handle1': some error", handleErrors["handle1"].Error())
+	_, err := resolver.fetchSecret([]string{"handle1"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "an error occurred while resolving 'handle1': some error")
 	checkErrorCountMetric(t, tel, 1, "error", "handle1")
 }
 
@@ -256,19 +256,19 @@ func TestFetchSecretEmptyValue(t *testing.T) {
 	resolver.commandHookFunc = func(string) ([]byte, error) {
 		return []byte("{\"handle1\":{\"value\": null}}"), nil
 	}
-	_, handleErrors := resolver.fetchSecret([]string{"handle1"})
-	assert.NotEmpty(t, handleErrors)
-	assert.Contains(t, handleErrors["handle1"].Error(), "resolved secret for 'handle1' is empty")
-	assert.Contains(t, handleErrors["handle1"].Error(), secretsManagementDocsURL)
+	_, err := resolver.fetchSecret([]string{"handle1"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "resolved secret for 'handle1' is empty")
+	assert.Contains(t, err.Error(), secretsManagementDocsURL)
 	checkErrorCountMetric(t, tel, 1, "empty", "handle1")
 
 	resolver.commandHookFunc = func(string) ([]byte, error) {
 		return []byte("{\"handle1\":{\"value\": \"\"}}"), nil
 	}
-	_, handleErrors = resolver.fetchSecret([]string{"handle1"})
-	assert.NotEmpty(t, handleErrors)
-	assert.Contains(t, handleErrors["handle1"].Error(), "resolved secret for 'handle1' is empty")
-	assert.Contains(t, handleErrors["handle1"].Error(), secretsManagementDocsURL)
+	_, err = resolver.fetchSecret([]string{"handle1"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "resolved secret for 'handle1' is empty")
+	assert.Contains(t, err.Error(), secretsManagementDocsURL)
 	checkErrorCountMetric(t, tel, 2, "empty", "handle1")
 }
 
