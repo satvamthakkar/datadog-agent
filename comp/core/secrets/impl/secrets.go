@@ -941,8 +941,6 @@ func (r *secretResolver) getDebugInfo(stats map[string]interface{}, includeVersi
 	if includeVersion {
 		if version, err := r.fetchSecretBackendVersion(); err == nil {
 			stats["executableVersion"] = strings.TrimSpace(version)
-		} else {
-			stats["executableVersion"] = "version info not found"
 		}
 	}
 
