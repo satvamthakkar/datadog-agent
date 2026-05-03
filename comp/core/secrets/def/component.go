@@ -56,4 +56,7 @@ type Component interface {
 	// RemoveOrigin removes a origin from the internal cache of the secret component. This does not remove secrets
 	// from the cache but the reference where those secrets are used.
 	RemoveOrigin(origin string)
+	// RenameOrigin renames all secret context entries that reference oldOrigin to newOrigin.
+	// Used to replace temporary scheduling origins with stable check instance IDs.
+	RenameOrigin(oldOrigin, newOrigin string)
 }

@@ -7,6 +7,7 @@ package autodiscoveryimpl
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/DataDog/datadog-agent/comp/core/autodiscovery/integration"
 	secrets "github.com/DataDog/datadog-agent/comp/core/secrets/def"
@@ -29,10 +30,13 @@ func decryptConfig(conf integration.Config, secretResolver secrets.Component) (i
 	}
 
 	// instances — failing instances are skipped so surviving ones are still scheduled.
+	// Each instance uses a temporary per-index origin (e.g. "http_check/0") that callers
+	// rename to the actual check instance ID once the fully-decrypted config is available.
 	var instanceErr error
 	instances := make([]integration.Data, 0, len(conf.Instances))
-	for _, inputInstance := range conf.Instances {
-		decryptedInstance, err := secretResolver.Resolve(inputInstance, conf.Name, conf.ImageName, conf.PodNamespace, false)
+	for i, inputInstance := range conf.Instances {
+		instanceOrigin := conf.Name + "/" + strconv.Itoa(i)
+		decryptedInstance, err := secretResolver.Resolve(inputInstance, instanceOrigin, conf.ImageName, conf.PodNamespace, false)
 		if err != nil {
 			instanceErr = fmt.Errorf("error while decrypting secrets in an instance: %s", err)
 			continue

@@ -772,6 +772,19 @@ func (r *secretResolver) RemoveOrigin(origin string) {
 	}
 }
 
+func (r *secretResolver) RenameOrigin(oldOrigin, newOrigin string) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	for handle, contexts := range r.origin {
+		for i, ctx := range contexts {
+			if ctx.origin == oldOrigin {
+				r.origin[handle][i].origin = newOrigin
+			}
+		}
+	}
+}
+
 // performRefresh executes the actual secret refresh operation
 func (r *secretResolver) performRefresh() (string, error) {
 	r.lock.Lock()

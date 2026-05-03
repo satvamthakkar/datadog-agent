@@ -53,6 +53,8 @@ func (m *MockSecretResolver) Resolve(data []byte, origin string, _ string, _ str
 
 func (m *MockSecretResolver) RemoveOrigin(_ string) {}
 
+func (m *MockSecretResolver) RenameOrigin(_, _ string) {}
+
 func (m *MockSecretResolver) SubscribeToChanges(callback secrets.SecretChangeCallback) {
 	if m.subscribers == nil {
 		m.subscribers = make([]secrets.SecretChangeCallback, 0)
@@ -113,25 +115,25 @@ func makeScenariosForConfig(conf integration.Config) []mockSecretScenario {
 	return []mockSecretScenario{
 		{
 			expectedData:   []byte("param1: ENC[foo]"),
-			expectedOrigin: conf.Name,
+			expectedOrigin: conf.Name, // init_config uses the check name
 			returnedData:   []byte("param1: foo"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param2: ENC[bar]"),
-			expectedOrigin: conf.Name,
+			expectedOrigin: conf.Name + "/0", // first (only) instance uses a temp per-index origin
 			returnedData:   []byte("param2: bar"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param3: ENC[met]"),
-			expectedOrigin: conf.Name,
+			expectedOrigin: conf.Name, // metrics uses the check name
 			returnedData:   []byte("param3: met"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param4: ENC[log]"),
-			expectedOrigin: conf.Name,
+			expectedOrigin: conf.Name, // logs uses the check name
 			returnedData:   []byte("param4: log"),
 			returnedError:  nil,
 		},
@@ -171,8 +173,8 @@ func TestDecryptConfigInstanceFailureSkipsInstance(t *testing.T) {
 		t: t,
 		scenarios: []mockSecretScenario{
 			{expectedData: []byte("param1: ENC[foo]"), expectedOrigin: tpl.Name, returnedData: []byte("param1: foo")},
-			{expectedData: []byte("bad: ENC[unknown]"), expectedOrigin: tpl.Name, returnedData: []byte("bad: ENC[unknown]"), returnedError: errors.New("unknown handle")},
-			{expectedData: []byte("good: ENC[bar]"), expectedOrigin: tpl.Name, returnedData: []byte("good: bar")},
+			{expectedData: []byte("bad: ENC[unknown]"), expectedOrigin: tpl.Name + "/0", returnedData: []byte("bad: ENC[unknown]"), returnedError: errors.New("unknown handle")},
+			{expectedData: []byte("good: ENC[bar]"), expectedOrigin: tpl.Name + "/1", returnedData: []byte("good: bar")},
 			{expectedData: []byte("param3: ENC[met]"), expectedOrigin: tpl.Name, returnedData: []byte("param3: met")},
 			{expectedData: []byte("param4: ENC[log]"), expectedOrigin: tpl.Name, returnedData: []byte("param4: log")},
 		},
@@ -204,7 +206,7 @@ func TestDecryptConfigInitConfigFailureDropsAll(t *testing.T) {
 		scenarios: []mockSecretScenario{
 			{
 				expectedData:   []byte("param1: ENC[foo]"),
-				expectedOrigin: sharedTpl.Name,
+				expectedOrigin: sharedTpl.Name, // init_config uses check name
 				returnedData:   []byte("param1: ENC[foo]"),
 				returnedError:  errors.New("could not resolve secret handle(s)"),
 			},
