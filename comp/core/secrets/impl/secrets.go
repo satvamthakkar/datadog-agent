@@ -283,8 +283,15 @@ func (r *secretResolver) registerSecretOrigin(handle string, origin string, path
 func (r *secretResolver) Configure(params secrets.ConfigParams) {
 	r.backendType = params.Type
 	r.backendConfig = params.Config
-	r.multiBackends = params.MultiBackends
 	r.backendCommand = params.Command
+
+	r.multiBackends = params.MultiBackends
+	for name := range r.multiBackends {
+		if name == "default" {
+			log.Warnf("multi_secret_backends: backend name \"default\" is reserved; this entry will be ignored")
+			delete(r.multiBackends, name)
+		}
+	}
 	r.embeddedBackendPermissiveRights = false
 
 	if r.backendCommand != "" && r.backendType != "" {
