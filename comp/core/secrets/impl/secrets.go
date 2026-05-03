@@ -441,12 +441,17 @@ func (r *secretResolver) SubscribeToChanges(cb secrets.SecretChangeCallback) {
 func (r *secretResolver) shouldResolvedSecret(handle string, origin string, imageName string, kubeNamespace string) bool {
 	var secretNamespace string
 
-	// When multi_secret_backends is in use the handle always has a backendID:: prefix;
-	// strip it before parsing the Kubernetes namespace so "prodk8s::ns/secret;key"
-	// extracts namespace "ns", not "prodk8s::ns".
+	// When multi_secret_backends is in use and the backend for this handle is
+	// k8s.secrets, strip the backendID:: prefix before parsing the Kubernetes
+	// namespace so "prodk8s::ns/secret;key" extracts "ns", not "prodk8s::ns".
+	// For other backend types (yaml, json, …) the prefix is left intact so the
+	// k8s-format patterns below do not match erroneously.
 	secretKey := handle
 	if r.multiBackends != nil {
-		_, secretKey = splitSecretHandle(handle)
+		backendID, key := splitSecretHandle(handle)
+		if backend, ok := r.multiBackends[backendID]; ok && backend.Type == "k8s.secrets" {
+			secretKey = key
+		}
 	}
 
 	// format: k8s_secret@namespace/secret-name/key
