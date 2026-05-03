@@ -153,9 +153,54 @@ func TestSecretResolve(t *testing.T) {
 	assert.True(t, mockResolve.haveAllScenariosBeenCalled())
 }
 
-// TestDecryptConfigPartialFailure verifies that when one section fails to resolve,
-// the other sections are still substituted using the partial results from Resolve.
-func TestDecryptConfigPartialFailure(t *testing.T) {
+// TestDecryptConfigInstanceFailureSkipsInstance verifies that when one instance fails to
+// resolve secrets, only that instance is excluded — the other instance and the remaining
+// sections (metrics, logs) are still resolved and scheduled.
+func TestDecryptConfigInstanceFailureSkipsInstance(t *testing.T) {
+	tpl := integration.Config{
+		Name:          "cpu",
+		ADIdentifiers: []string{"redis"},
+		InitConfig:    []byte("param1: ENC[foo]"),
+		Instances: []integration.Data{
+			[]byte("bad: ENC[unknown]"),
+			[]byte("good: ENC[bar]"),
+		},
+		MetricConfig: []byte("param3: ENC[met]"),
+		LogsConfig:   []byte("param4: ENC[log]"),
+	}
+	digest := tpl.Digest()
+	mockResolve := &MockSecretResolver{
+		t: t,
+		scenarios: []mockSecretScenario{
+			{expectedData: []byte("param1: ENC[foo]"), expectedOrigin: digest, returnedData: []byte("param1: foo")},
+			{expectedData: []byte("bad: ENC[unknown]"), expectedOrigin: digest, returnedData: []byte("bad: ENC[unknown]"), returnedError: errors.New("unknown handle")},
+			{expectedData: []byte("good: ENC[bar]"), expectedOrigin: digest, returnedData: []byte("good: bar")},
+			{expectedData: []byte("param3: ENC[met]"), expectedOrigin: digest, returnedData: []byte("param3: met")},
+			{expectedData: []byte("param4: ENC[log]"), expectedOrigin: digest, returnedData: []byte("param4: log")},
+		},
+	}
+
+	newConfig, err := decryptConfig(tpl, mockResolve, digest)
+
+	// error is propagated so the caller knows an instance was dropped
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown handle")
+
+	// the failing instance is excluded; the surviving instance is present
+	require.Len(t, newConfig.Instances, 1)
+	assert.Equal(t, integration.Data("good: bar"), newConfig.Instances[0])
+
+	// init_config, metrics, and logs are fully resolved
+	assert.Equal(t, integration.Data("param1: foo"), newConfig.InitConfig)
+	assert.Equal(t, integration.Data("param3: met"), newConfig.MetricConfig)
+	assert.Equal(t, integration.Data("param4: log"), newConfig.LogsConfig)
+
+	assert.True(t, mockResolve.haveAllScenariosBeenCalled())
+}
+
+// TestDecryptConfigInitConfigFailureDropsAll verifies that a failure in init_config drops
+// the entire config — no instances are resolved since init_config is shared by all.
+func TestDecryptConfigInitConfigFailureDropsAll(t *testing.T) {
 	digest := sharedTpl.Digest()
 	mockResolve := &MockSecretResolver{
 		t: t,
@@ -163,43 +208,17 @@ func TestDecryptConfigPartialFailure(t *testing.T) {
 			{
 				expectedData:   []byte("param1: ENC[foo]"),
 				expectedOrigin: digest,
-				returnedData:   []byte("param1: foo"),
-				returnedError:  nil,
-			},
-			{
-				// instance Resolve returns partial data alongside an error
-				expectedData:   []byte("param2: ENC[bar]"),
-				expectedOrigin: digest,
-				returnedData:   []byte("param2: ENC[bar]"),
-				returnedError:  errors.New("could not resolve 1 secret handle(s)"),
-			},
-			{
-				expectedData:   []byte("param3: ENC[met]"),
-				expectedOrigin: digest,
-				returnedData:   []byte("param3: met"),
-				returnedError:  nil,
-			},
-			{
-				expectedData:   []byte("param4: ENC[log]"),
-				expectedOrigin: digest,
-				returnedData:   []byte("param4: log"),
-				returnedError:  nil,
+				returnedData:   []byte("param1: ENC[foo]"),
+				returnedError:  errors.New("could not resolve secret handle(s)"),
 			},
 		},
 	}
 
-	newConfig, err := decryptConfig(sharedTpl, mockResolve, digest)
+	_, err := decryptConfig(sharedTpl, mockResolve, digest)
 
-	// error must be propagated
+	// error propagated, and no further Resolve calls were made (instances, metrics, logs skipped)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not resolve")
-
-	// successfully resolved sections must use the partial results, not original values
-	assert.Equal(t, integration.Data("param1: foo"), newConfig.InitConfig)
-	assert.Equal(t, integration.Data("param2: ENC[bar]"), newConfig.Instances[0])
-	assert.Equal(t, integration.Data("param3: met"), newConfig.MetricConfig)
-	assert.Equal(t, integration.Data("param4: log"), newConfig.LogsConfig)
-
+	assert.Contains(t, err.Error(), "init_config")
 	assert.True(t, mockResolve.haveAllScenariosBeenCalled())
 }
 
