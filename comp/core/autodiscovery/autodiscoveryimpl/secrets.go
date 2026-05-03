@@ -14,7 +14,7 @@ import (
 	"github.com/DataDog/datadog-agent/pkg/util/log"
 )
 
-func decryptConfig(conf integration.Config, secretResolver secrets.Component, origin string) (integration.Config, error) {
+func decryptConfig(conf integration.Config, secretResolver secrets.Component) (integration.Config, error) {
 	if pkgconfigsetup.Datadog().GetBool("secret_backend_skip_checks") {
 		log.Tracef("'secret_backend_skip_checks' is enabled, not decrypting configuration %q", conf.Name)
 		return conf, nil
@@ -23,7 +23,7 @@ func decryptConfig(conf integration.Config, secretResolver secrets.Component, or
 	var err error
 
 	// init_config is shared by all instances — any failure drops the entire config.
-	conf.InitConfig, err = secretResolver.Resolve(conf.InitConfig, origin, conf.ImageName, conf.PodNamespace, false)
+	conf.InitConfig, err = secretResolver.Resolve(conf.InitConfig, conf.Name, conf.ImageName, conf.PodNamespace, false)
 	if err != nil {
 		return conf, fmt.Errorf("error while decrypting secrets in 'init_config': %s", err)
 	}
@@ -32,7 +32,7 @@ func decryptConfig(conf integration.Config, secretResolver secrets.Component, or
 	var instanceErr error
 	instances := make([]integration.Data, 0, len(conf.Instances))
 	for _, inputInstance := range conf.Instances {
-		decryptedInstance, err := secretResolver.Resolve(inputInstance, origin, conf.ImageName, conf.PodNamespace, false)
+		decryptedInstance, err := secretResolver.Resolve(inputInstance, conf.Name, conf.ImageName, conf.PodNamespace, false)
 		if err != nil {
 			instanceErr = fmt.Errorf("error while decrypting secrets in an instance: %s", err)
 			continue
@@ -42,13 +42,13 @@ func decryptConfig(conf integration.Config, secretResolver secrets.Component, or
 	conf.Instances = instances
 
 	// metrics
-	conf.MetricConfig, err = secretResolver.Resolve(conf.MetricConfig, origin, conf.ImageName, conf.PodNamespace, false)
+	conf.MetricConfig, err = secretResolver.Resolve(conf.MetricConfig, conf.Name, conf.ImageName, conf.PodNamespace, false)
 	if err != nil {
 		return conf, fmt.Errorf("error while decrypting secrets in 'metrics': %s", err)
 	}
 
 	// logs
-	conf.LogsConfig, err = secretResolver.Resolve(conf.LogsConfig, origin, conf.ImageName, conf.PodNamespace, false)
+	conf.LogsConfig, err = secretResolver.Resolve(conf.LogsConfig, conf.Name, conf.ImageName, conf.PodNamespace, false)
 	if err != nil {
 		return conf, fmt.Errorf("error while decrypting secrets in 'logs': %s", err)
 	}

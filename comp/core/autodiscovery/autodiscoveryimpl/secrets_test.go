@@ -110,29 +110,28 @@ var sharedTpl = integration.Config{
 }
 
 func makeScenariosForConfig(conf integration.Config) []mockSecretScenario {
-	digest := conf.Digest()
 	return []mockSecretScenario{
 		{
 			expectedData:   []byte("param1: ENC[foo]"),
-			expectedOrigin: digest,
+			expectedOrigin: conf.Name,
 			returnedData:   []byte("param1: foo"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param2: ENC[bar]"),
-			expectedOrigin: digest,
+			expectedOrigin: conf.Name,
 			returnedData:   []byte("param2: bar"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param3: ENC[met]"),
-			expectedOrigin: digest,
+			expectedOrigin: conf.Name,
 			returnedData:   []byte("param3: met"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param4: ENC[log]"),
-			expectedOrigin: digest,
+			expectedOrigin: conf.Name,
 			returnedData:   []byte("param4: log"),
 			returnedError:  nil,
 		},
@@ -145,7 +144,7 @@ var makeSharedScenarios = func() []mockSecretScenario {
 
 func TestSecretResolve(t *testing.T) {
 	mockResolve := &MockSecretResolver{t: t, scenarios: makeSharedScenarios()}
-	newConfig, err := decryptConfig(sharedTpl, mockResolve, sharedTpl.Digest())
+	newConfig, err := decryptConfig(sharedTpl, mockResolve)
 	require.NoError(t, err)
 
 	assert.NotEqual(t, newConfig.Instances, sharedTpl.Instances)
@@ -168,19 +167,18 @@ func TestDecryptConfigInstanceFailureSkipsInstance(t *testing.T) {
 		MetricConfig: []byte("param3: ENC[met]"),
 		LogsConfig:   []byte("param4: ENC[log]"),
 	}
-	digest := tpl.Digest()
 	mockResolve := &MockSecretResolver{
 		t: t,
 		scenarios: []mockSecretScenario{
-			{expectedData: []byte("param1: ENC[foo]"), expectedOrigin: digest, returnedData: []byte("param1: foo")},
-			{expectedData: []byte("bad: ENC[unknown]"), expectedOrigin: digest, returnedData: []byte("bad: ENC[unknown]"), returnedError: errors.New("unknown handle")},
-			{expectedData: []byte("good: ENC[bar]"), expectedOrigin: digest, returnedData: []byte("good: bar")},
-			{expectedData: []byte("param3: ENC[met]"), expectedOrigin: digest, returnedData: []byte("param3: met")},
-			{expectedData: []byte("param4: ENC[log]"), expectedOrigin: digest, returnedData: []byte("param4: log")},
+			{expectedData: []byte("param1: ENC[foo]"), expectedOrigin: tpl.Name, returnedData: []byte("param1: foo")},
+			{expectedData: []byte("bad: ENC[unknown]"), expectedOrigin: tpl.Name, returnedData: []byte("bad: ENC[unknown]"), returnedError: errors.New("unknown handle")},
+			{expectedData: []byte("good: ENC[bar]"), expectedOrigin: tpl.Name, returnedData: []byte("good: bar")},
+			{expectedData: []byte("param3: ENC[met]"), expectedOrigin: tpl.Name, returnedData: []byte("param3: met")},
+			{expectedData: []byte("param4: ENC[log]"), expectedOrigin: tpl.Name, returnedData: []byte("param4: log")},
 		},
 	}
 
-	newConfig, err := decryptConfig(tpl, mockResolve, digest)
+	newConfig, err := decryptConfig(tpl, mockResolve)
 
 	// error is propagated so the caller knows an instance was dropped
 	require.Error(t, err)
@@ -201,20 +199,19 @@ func TestDecryptConfigInstanceFailureSkipsInstance(t *testing.T) {
 // TestDecryptConfigInitConfigFailureDropsAll verifies that a failure in init_config drops
 // the entire config — no instances are resolved since init_config is shared by all.
 func TestDecryptConfigInitConfigFailureDropsAll(t *testing.T) {
-	digest := sharedTpl.Digest()
 	mockResolve := &MockSecretResolver{
 		t: t,
 		scenarios: []mockSecretScenario{
 			{
 				expectedData:   []byte("param1: ENC[foo]"),
-				expectedOrigin: digest,
+				expectedOrigin: sharedTpl.Name,
 				returnedData:   []byte("param1: ENC[foo]"),
 				returnedError:  errors.New("could not resolve secret handle(s)"),
 			},
 		},
 	}
 
-	_, err := decryptConfig(sharedTpl, mockResolve, digest)
+	_, err := decryptConfig(sharedTpl, mockResolve)
 
 	// error propagated, and no further Resolve calls were made (instances, metrics, logs skipped)
 	require.Error(t, err)
@@ -229,7 +226,7 @@ func TestSkipSecretResolve(t *testing.T) {
 	cfg.SetWithoutSource("secret_backend_skip_checks", true)
 	defer cfg.SetWithoutSource("secret_backend_skip_checks", false)
 
-	c, err := decryptConfig(sharedTpl, mockResolve, sharedTpl.Digest())
+	c, err := decryptConfig(sharedTpl, mockResolve)
 	require.NoError(t, err)
 
 	assert.Equal(t, sharedTpl.Instances, c.Instances)
