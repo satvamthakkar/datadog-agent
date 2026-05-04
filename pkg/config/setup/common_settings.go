@@ -460,7 +460,12 @@ func initCoreAgentFull(config pkgconfigmodel.Setup) {
 	config.BindEnvAndSetDefault("gpu.disabled_collectors", []string{})
 
 	// NCCL
-	config.BindEnvAndSetDefault("nccl.enabled", false)
+	config.BindEnvAndSetDefault("gpu.nccl.enabled", false)
+	config.BindEnvAndSetDefault("gpu.nccl.socket_path", "/var/run/datadog/nccl.socket")
+	// host_socket_path is read by the helm chart and operator to decide whether
+	// to mount /var/run/datadog into the agent pod. For DSD/APM-enabled deployments
+	// the directory is already mounted; this setting matters for NCCL-only setups.
+	config.BindEnvAndSetDefault("gpu.nccl.host_socket_path", "/var/run/datadog")
 
 	// Cloud Foundry BBS
 	config.BindEnvAndSetDefault("cloud_foundry_bbs.url", "https://bbs.service.cf.internal:8889")
