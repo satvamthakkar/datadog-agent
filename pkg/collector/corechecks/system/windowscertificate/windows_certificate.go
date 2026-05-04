@@ -270,7 +270,7 @@ func (w *WinCertChk) Run() error {
 
 		// Adding Subject and Certificate Store as tags
 		tags := getSubjectTags(cert.Certificate)
-		tags = append(tags, "certificate_store:"+w.certificateStoreTag(cert))
+		tags = append(tags, "certificate_store:"+w.storeNameTag(cert.StoreName))
 		tags = append(tags, serverTag)
 		tags = append(tags, "certificate_thumbprint:"+cert.Thumbprint)
 		// Need to use hex format for serial numbers as they are typically displayed in hex format in the UI
@@ -352,7 +352,7 @@ func (w *WinCertChk) Run() error {
 
 		// Adding CRL Issuer and Certificate Store as tags
 		crlTags := getCrlIssuerTags(crlIssuer)
-		crlTags = append(crlTags, "certificate_store:"+w.certificateStoreTagCRL(crl))
+		crlTags = append(crlTags, "certificate_store:"+w.storeNameTag(crl.StoreName))
 		crlTags = append(crlTags, serverTag)
 		crlTags = append(crlTags, "crl_thumbprint:"+crl.Thumbprint)
 		sender.Gauge("windows_certificate.crl_days_remaining", crlDaysRemaining, "", crlTags)
@@ -384,11 +384,11 @@ func (w *WinCertChk) Run() error {
 	return nil
 }
 
-func (w *WinCertChk) resolveMatchedLocalStoreNames() ([]string, error) {
+func (w *WinCertChk) resolveStoreNamesFrom(root registry.Key) ([]string, error) {
 	static := strings.TrimSpace(w.config.CertificateStore)
 	var available []string
 	if len(w.certStoreRegexes) > 0 {
-		names, err := localMachineSystemCertificateStoreNames()
+		names, err := systemCertificateStoreNames(root)
 		if err != nil {
 			return nil, err
 		}
@@ -397,16 +397,9 @@ func (w *WinCertChk) resolveMatchedLocalStoreNames() ([]string, error) {
 	return resolveStoreNames(static, available, w.certStoreRegexes), nil
 }
 
-func (w *WinCertChk) certificateStoreTag(cert certInfo) string {
-	if cert.StoreName != "" {
-		return cert.StoreName
-	}
-	return strings.TrimSpace(w.config.CertificateStore)
-}
-
-func (w *WinCertChk) certificateStoreTagCRL(c crlInfoCopy) string {
-	if c.StoreName != "" {
-		return c.StoreName
+func (w *WinCertChk) storeNameTag(storeName string) string {
+	if storeName != "" {
+		return storeName
 	}
 	return strings.TrimSpace(w.config.CertificateStore)
 }
@@ -423,11 +416,11 @@ func (w *WinCertChk) storeConfigDescriptionForLogs() string {
 }
 
 func (w *WinCertChk) collectLocalCertificates() ([]certInfo, []crlInfoCopy, string, error) {
-	stores, err := w.resolveMatchedLocalStoreNames()
+	stores, err := w.resolveStoreNamesFrom(registry.LOCAL_MACHINE)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	if len(stores) == 0 && len(w.certStoreRegexes) > 0 && strings.TrimSpace(w.config.CertificateStore) == "" {
+	if len(stores) == 0 && strings.TrimSpace(w.config.CertificateStore) == "" {
 		log.Warnf("No Local Machine certificate store names matched certificate_store_regex %#v", w.config.CertificateStoreRegex)
 	}
 	var certificates []certInfo
@@ -469,17 +462,11 @@ func (w *WinCertChk) collectRemoteCertificates() ([]certInfo, []crlInfoCopy, str
 	}
 	defer remoteRegKey.Close()
 
-	static := strings.TrimSpace(w.config.CertificateStore)
-	var available []string
-	if len(w.certStoreRegexes) > 0 {
-		names, enumErr := remoteMachineSystemCertificateStoreNames(remoteRegKey)
-		if enumErr != nil {
-			return nil, nil, "", enumErr
-		}
-		available = names
+	stores, err := w.resolveStoreNamesFrom(remoteRegKey)
+	if err != nil {
+		return nil, nil, "", err
 	}
-	stores := resolveStoreNames(static, available, w.certStoreRegexes)
-	if len(stores) == 0 && static == "" {
+	if len(stores) == 0 && strings.TrimSpace(w.config.CertificateStore) == "" {
 		log.Warnf("No certificate store names on remote server %s matched certificate_store_regex %#v", server, w.config.CertificateStoreRegex)
 	}
 
@@ -497,25 +484,13 @@ func (w *WinCertChk) collectRemoteCertificates() ([]certInfo, []crlInfoCopy, str
 	return certificates, crlInfo, "server:" + server, nil
 }
 
-func (w *WinCertChk) getCertificates(store string, certFilters []string, collectCRL bool) ([]certInfo, []crlInfoCopy, error) {
-	var certificates []certInfo
-	var crlInfo []crlInfoCopy
-	storeName := windows.StringToUTF16Ptr(store)
-
-	log.Debugf("Opening certificate store: %s", store)
-	storeHandle, err := openCertificateStore(
-		windows.CERT_STORE_PROV_SYSTEM,
-		certStoreOpenFlags,
-		uintptr(unsafe.Pointer(storeName)))
-	if err != nil {
-		log.Errorf("Error opening certificate store %s: %v", store, err)
-		return nil, nil, err
-	}
-	// Close the store when the function returns
-	defer closeCertificateStore(storeHandle, store)
-
+func (w *WinCertChk) collectFromStoreHandle(storeHandle windows.Handle, store string, certFilters []string, collectCRL bool) ([]certInfo, []crlInfoCopy, error) {
 	log.Debugf("Enumerating certificates in store")
-
+	var (
+		certificates []certInfo
+		crlInfo      []crlInfoCopy
+		err          error
+	)
 	if len(certFilters) == 0 {
 		certificates, err = getEnumCertificatesInStore(storeHandle, w.config.CertChainValidation)
 	} else {
@@ -542,8 +517,22 @@ func (w *WinCertChk) getCertificates(store string, certFilters []string, collect
 	for i := range crlInfo {
 		crlInfo[i].StoreName = store
 	}
-
 	return certificates, crlInfo, nil
+}
+
+func (w *WinCertChk) getCertificates(store string, certFilters []string, collectCRL bool) ([]certInfo, []crlInfoCopy, error) {
+	storeName := windows.StringToUTF16Ptr(store)
+	log.Debugf("Opening certificate store: %s", store)
+	storeHandle, err := openCertificateStore(
+		windows.CERT_STORE_PROV_SYSTEM,
+		certStoreOpenFlags,
+		uintptr(unsafe.Pointer(storeName)))
+	if err != nil {
+		log.Errorf("Error opening certificate store %s: %v", store, err)
+		return nil, nil, err
+	}
+	defer closeCertificateStore(storeHandle, store)
+	return w.collectFromStoreHandle(storeHandle, store, certFilters, collectCRL)
 }
 
 func (w *WinCertChk) collectRemoteCertStore(remoteRegKey registry.Key, store string, certFilters []string, collectCRL bool) ([]certInfo, []crlInfoCopy, error) {
@@ -566,39 +555,7 @@ func (w *WinCertChk) collectRemoteCertStore(remoteRegKey registry.Key, store str
 	}
 	log.Debugf("Certificate store opened successfully")
 	defer closeCertificateStore(storeHandle, store)
-
-	log.Debugf("Enumerating certificates in store")
-	var certificates []certInfo
-
-	if len(certFilters) == 0 {
-		certificates, err = getEnumCertificatesInStore(storeHandle, w.config.CertChainValidation)
-	} else {
-		certificates, err = findCertificatesInStore(storeHandle, certFilters, w.config.CertChainValidation)
-	}
-	if err != nil {
-		log.Errorf("Error getting certificates: %v", err)
-		return nil, nil, err
-	}
-	log.Debugf("Found %d certificates in store %s", len(certificates), store)
-
-	var crlInfo []crlInfoCopy
-	if collectCRL {
-		crlInfo, err = getCrlInfo(storeHandle)
-		if err != nil {
-			log.Errorf("Error getting CRLs: %v", err)
-			return nil, nil, err
-		}
-	}
-	log.Debugf("Found %d CRLs in store %s", len(crlInfo), store)
-
-	for i := range certificates {
-		certificates[i].StoreName = store
-	}
-	for i := range crlInfo {
-		crlInfo[i].StoreName = store
-	}
-
-	return certificates, crlInfo, nil
+	return w.collectFromStoreHandle(storeHandle, store, certFilters, collectCRL)
 }
 
 func openCertificateStore(storeProvider uintptr, flags uint32, para uintptr) (windows.Handle, error) {
