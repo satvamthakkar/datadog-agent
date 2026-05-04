@@ -79,30 +79,37 @@ additional_endpoints:
 	}, 30*time.Second, 2*time.Second, "could not verify all secrets are resolved within the allotted time")
 }
 
-// dummyScript is a secret backend command that resolves no handles, used to verify that
-// secret_backend_command takes precedence over multi_secret_backends: handles are sent
-// as-is to the command rather than being routed by backendID prefix.
+// dummyScript is a secret backend command that resolves every handle to a fixed value.
+// Used to verify that secret_backend_command takes precedence over multi_secret_backends:
+// handles are sent as-is to the command without backendID routing. The multi_secret_backends
+// backends reference non-existent files; if routing were incorrectly applied the backends
+// would fail and the agent would not start — so agent startup proves the command won.
 const dummyScript = `#!/usr/bin/env python3
 import json, sys
 payload = json.load(sys.stdin)
-print(json.dumps({h: {"error": "unknown handle"} for h in payload["secrets"]}))
+print(json.dumps({h: {"value": "00000000000000000000000000000000"} for h in payload["secrets"]}))
 `
 
 // TestSecretBackendCommandOverridesMulti verifies that when secret_backend_command is set
-// alongside multi_secret_backends, the command wins: handles are sent as-is to the command
-// without backendID routing, causing resolution to fail for prefixed handles.
+// alongside multi_secret_backends, the command wins: handles (including ones with the
+// "backendID::" prefix) are sent as-is to the command without routing. The multi_secret_backends
+// entries reference non-existent files; correct behaviour (command wins) lets the agent start
+// and resolve all handles, while incorrect behaviour (routing applied) would send handles to
+// the file backends which would fail, preventing agent startup.
 func (v *linuxRuntimeSecretSuite) TestSecretBackendCommandOverridesMulti() {
-	config := `secret_backend_command: /etc/datadog-agent/dummy_secret_script.py
+	config := `api_key: ENC[yaml::api_key_secret]
+secret_backend_command: /etc/datadog-agent/dummy_secret_script.py
 multi_secret_backends:
   yaml:
     type: file.yaml
     config:
-      file_path: /tmp/secrets.yaml
+      file_path: /tmp/does-not-exist.yaml
   json:
     type: file.json
     config:
-      file_path: /tmp/secrets.json
-tags:
+      file_path: /tmp/does-not-exist.json
+additional_endpoints:
+  "https://app.datadoghq.com":
   - ENC[yaml::fake_yaml_key]
   - ENC[json::fake_json_key]`
 
@@ -114,17 +121,19 @@ tags:
 	v.UpdateEnv(awshost.Provisioner(
 		awshost.WithRunOptions(scenec2.WithAgentOptions(
 			agentparams.WithFileWithPermissions("/etc/datadog-agent/dummy_secret_script.py", dummyScript, true, scriptPermission),
+			agentparams.WithSkipAPIKeyInConfig(),
 			agentparams.WithAgentConfig(config),
 		)),
 	))
 
 	assert.EventuallyWithT(v.T(), func(t *assert.CollectT) {
 		secretOutput := v.Env().Agent.Client.Secret()
-		// Handles are forwarded as-is to the command; the dummy script rejects them all.
-		require.Contains(t, secretOutput, "Secrets not resolved")
+		// Handles are forwarded as-is to the command (no routing). If routing had been
+		// applied the file backends would fail (files don't exist) and the agent would
+		// not have started — reaching this assertion proves the command won.
 		require.Contains(t, secretOutput, "yaml::fake_yaml_key")
 		require.Contains(t, secretOutput, "json::fake_json_key")
-	}, 30*time.Second, 2*time.Second, "secrets should be unresolved when secret_backend_command overrides multi_secret_backends")
+	}, 30*time.Second, 2*time.Second, "secret_backend_command should resolve prefixed handles without backendID routing")
 }
 
 // TestSecretBackendTypeOverridesMulti verifies that when secret_backend_type is set, every
