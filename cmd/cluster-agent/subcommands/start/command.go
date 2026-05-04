@@ -86,11 +86,12 @@ import (
 	metricscompressionfx "github.com/DataDog/datadog-agent/comp/serializer/metricscompression/fx"
 	"github.com/DataDog/datadog-agent/pkg/clusteragent"
 	admissionpkg "github.com/DataDog/datadog-agent/pkg/clusteragent/admission"
+	admissionautoscaling "github.com/DataDog/datadog-agent/pkg/clusteragent/admission/mutate/autoscaling"
 	admissionpatch "github.com/DataDog/datadog-agent/pkg/clusteragent/admission/patch"
 	apidca "github.com/DataDog/datadog-agent/pkg/clusteragent/api"
+	"github.com/DataDog/datadog-agent/pkg/clusteragent/autoscaling/autoscalinggate"
 	"github.com/DataDog/datadog-agent/pkg/clusteragent/autoscaling/cluster"
 	clusterspot "github.com/DataDog/datadog-agent/pkg/clusteragent/autoscaling/cluster/spot"
-	"github.com/DataDog/datadog-agent/pkg/clusteragent/autoscaling/workload"
 	"github.com/DataDog/datadog-agent/pkg/clusteragent/autoscaling/workload/provider"
 	pkgclusterchecks "github.com/DataDog/datadog-agent/pkg/clusteragent/clusterchecks"
 	"github.com/DataDog/datadog-agent/pkg/clusteragent/kubeactions"
@@ -160,6 +161,7 @@ func Commands(globalParams *command.GlobalParams) []*cobra.Command {
 			// `fxutil.OneShot`.
 			return fxutil.OneShot(start,
 				fx.Supply(globalParams),
+				fx.Supply(autoscalinggate.New()),
 				fx.Supply(core.BundleParams{
 					ConfigParams: config.NewClusterAgentParams(globalParams.ConfFilePath, config.WithExtraConfFiles(globalParams.ExtraConfFilePath)),
 					LogParams:    log.ForDaemon(command.LoggerName, "log_file", defaultpaths.DCALogFile),
@@ -287,6 +289,7 @@ func start(log log.Component,
 	_ metadatarunner.Component,
 	tracerouteComp traceroute.Component,
 	eventPlatform eventplatform.Component,
+	autoscalingGate *autoscalinggate.Gate,
 ) error {
 	stopCh := make(chan struct{})
 	validatingStopCh := make(chan struct{})
@@ -535,7 +538,6 @@ func start(log log.Component,
 	}
 
 	// Autoscaling Product
-	var pp workload.PodPatcher
 	if config.GetBool("autoscaling.workload.enabled") {
 		if rcClient == nil {
 			return errors.New("Remote config is disabled or failed to initialize, remote config is a required dependency for autoscaling")
@@ -545,11 +547,13 @@ func start(log log.Component,
 			log.Error("Admission controller is disabled, vertical autoscaling requires the admission controller to be enabled. Vertical scaling will be disabled.")
 		}
 
-		if patcher, err := provider.StartWorkloadAutoscaling(mainCtx, clusterID, clusterName, le.IsLeader, apiCl, rcClient, wmeta, taggerComp, demultiplexer); err == nil {
-			pp = patcher
-		} else {
-			return fmt.Errorf("Error while starting workload autoscaling: %v", err)
+		// Register the gate handlers that allow the lazy startup of the
+		// autoscaling stack. It stays off until a DatadogPodAutoscaler or
+		// DatadogPodAutoscalerClusterProfile resource is observed.
+		if err := provider.RegisterAutoscalingGateHandlers(apiCl.DynamicInformerFactory, autoscalingGate); err != nil {
+			return fmt.Errorf("Error while registering autoscaling gate handlers: %w", err)
 		}
+		apiCl.DynamicInformerFactory.Start(mainCtx.Done())
 	}
 
 	if config.GetBool("autoscaling.cluster.enabled") {
@@ -621,7 +625,10 @@ func start(log log.Component,
 		}
 	}
 
-	if config.GetBool("admission_controller.enabled") {
+	var autoscalingWebhook *admissionautoscaling.Webhook
+	admissionEnabled := config.GetBool("admission_controller.enabled")
+
+	if admissionEnabled {
 		if config.GetBool("admission_controller.auto_instrumentation.patcher.enabled") {
 			patchCtx := admissionpatch.ControllerContext{
 				LeadershipStateSubscribeFunc: le.Subscribe,
@@ -651,7 +658,7 @@ func start(log log.Component,
 			FilterStore:                  filterStore,
 		}
 
-		webhooks, err := admissionpkg.StartControllers(admissionCtx, datadogConfig, wmeta, pp, sh)
+		webhooks, err := admissionpkg.StartControllers(admissionCtx, datadogConfig, wmeta, sh)
 		// Ignore the error if it's related to the validatingwebhookconfigurations.
 		var syncInformerError *apiserver.SyncInformersError
 		if err != nil && !(errors.As(err, &syncInformerError) && syncInformerError.Name == apiserver.ValidatingWebhooksInformer) {
@@ -681,9 +688,25 @@ func start(log log.Component,
 					pkglog.Errorf("Error in the Admission Controller Webhook Server: %v", errServ)
 				}
 			}()
+
+			for _, webhook := range webhooks {
+				if aw, ok := webhook.(*admissionautoscaling.Webhook); ok {
+					autoscalingWebhook = aw
+					break
+				}
+			}
 		}
 	} else {
 		pkglog.Info("Admission controller is disabled")
+	}
+
+	// Some autoscaling features don't require the admission webhook, so start
+	// the autoscaling stack even without it.
+	if config.GetBool("autoscaling.workload.enabled") {
+		if admissionEnabled && autoscalingWebhook == nil {
+			pkglog.Errorf("Autoscaling webhook not available. Vertical autoscaling will not apply recommendations to new pods")
+		}
+		go provider.StartWorkloadAutoscalingOnGate(mainCtx, autoscalingGate, clusterID, clusterName, le.IsLeader, apiCl, rcClient, wmeta, taggerComp, demultiplexer, autoscalingWebhook)
 	}
 
 	if config.GetBool("cluster_agent.mcp.enabled") {
