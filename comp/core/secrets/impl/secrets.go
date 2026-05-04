@@ -293,21 +293,31 @@ func (r *secretResolver) Configure(params secrets.ConfigParams) {
 	}
 	r.embeddedBackendPermissiveRights = false
 
-	if r.backendCommand != "" && r.backendType != "" {
-		log.Warnf("Both secret_backend_command and secret_backend_type are set. secret_backend_command takes precedence; secret_backend_type is ignored. To use native backend (aws.secrets, hashicorp.vault, etc.), remove secret_backend_command from datadog.yaml. Docs: %s", secretsManagementDocsURL)
-	}
-	// Cases 5 and 7: secret_backend_command + multi_secret_backends — command wins, multiBackends ignored.
-	if r.backendCommand != "" && r.multiBackends != nil {
-		log.Warnf("Both secret_backend_command and multi_secret_backends are set. secret_backend_command takes precedence; multi_secret_backends is ignored. To use multi_secret_backends and ENC[backendID::secretKey] routing, remove secret_backend_command from datadog.yaml. Docs: %s", secretsManagementDocsURL)
+	var activeBackend string
+	var ignoredBackends []string
+	if r.backendCommand != "" {
+		activeBackend = "secret_backend_command"
+		if r.backendType != "" {
+			ignoredBackends = append(ignoredBackends, "secret_backend_type")
+		}
+		if r.multiBackends != nil {
+			ignoredBackends = append(ignoredBackends, "multi_secret_backends")
+		}
 		r.multiBackends = nil
+	} else if r.backendType != "" {
+		activeBackend = "secret_backend_type"
+		if r.multiBackends != nil {
+			ignoredBackends = append(ignoredBackends, "multi_secret_backends")
+			r.multiBackends = nil
+		}
+	} else if r.multiBackends != nil {
+		activeBackend = "multi_secret_backends"
 	}
-	// Case 6: secret_backend_type + multi_secret_backends (no command) — type wins, multiBackends ignored.
-	if r.backendType != "" && r.multiBackends != nil && r.backendCommand == "" {
-		log.Warnf("Both secret_backend_type and multi_secret_backends are set. secret_backend_type takes precedence; multi_secret_backends is ignored. To use multi_secret_backends and ENC[backendID::secretKey] routing, remove secret_backend_type from datadog.yaml. Docs: %s", secretsManagementDocsURL)
-		r.multiBackends = nil
+	if len(ignoredBackends) > 0 {
+		log.Warnf("%s takes precedence over %s. Remove %s from datadog.yaml to switch. Docs: %s", activeBackend, strings.Join(ignoredBackends, " and "), activeBackend, secretsManagementDocsURL)
 	}
-	// use the embedded connector if a backend type or named backends are configured and no explicit command is set
-	if (r.backendType != "" || r.multiBackends != nil) && r.backendCommand == "" {
+	// use the embedded connector if a native backend is configured and no explicit command is set
+	if activeBackend != "" && activeBackend != "secret_backend_command" {
 		if runtime.GOOS == "windows" {
 			r.backendCommand = filepath.Join(
 				defaultpaths.GetEmbeddedBinPath(),
