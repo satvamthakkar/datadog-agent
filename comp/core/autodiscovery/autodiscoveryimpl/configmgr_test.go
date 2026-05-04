@@ -144,13 +144,13 @@ func (suite *ConfigManagerSuite) TestNewNonTemplateWithSecretsScheduled() {
 	mockResolver := MockSecretResolver{t: suite.T(), scenarios: []mockSecretScenario{
 		{
 			expectedData:   []byte("foo: ENC[bar]"),
-			expectedOrigin: inputNewConfig.Digest(),
+			expectedOrigin: inputNewConfig.Name + "/0",
 			returnedData:   []byte("foo: barDecoded"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte{},
-			expectedOrigin: inputNewConfig.Digest(),
+			expectedOrigin: inputNewConfig.Name,
 			returnedData:   []byte{},
 			returnedError:  nil,
 		},
@@ -183,13 +183,13 @@ func (suite *ConfigManagerSuite) TestNewClusterCheckWithSecretsScheduled() {
 	mockResolver := &MockSecretResolver{t: suite.T(), scenarios: []mockSecretScenario{
 		{
 			expectedData:   []byte("foo: ENC[bar]"),
-			expectedOrigin: inputNewConfig.Digest(),
+			expectedOrigin: inputNewConfig.Name + "/0",
 			returnedData:   []byte("foo: barDecoded"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte{},
-			expectedOrigin: inputNewConfig.Digest(),
+			expectedOrigin: inputNewConfig.Name,
 			returnedData:   []byte{},
 			returnedError:  nil,
 		},

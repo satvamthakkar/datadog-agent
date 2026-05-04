@@ -579,13 +579,13 @@ func TestGetUnresolvedConfigs(t *testing.T) {
 	mockResolver := MockSecretResolver{t: t, scenarios: []mockSecretScenario{
 		{
 			expectedData:   []byte{},
-			expectedOrigin: c.Digest(),
+			expectedOrigin: c.Name,
 			returnedData:   []byte{},
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param1: ENC[foo]\n"),
-			expectedOrigin: c.Digest(),
+			expectedOrigin: c.Name,
 			returnedData:   []byte("param1: foo\n"),
 			returnedError:  nil,
 		},
@@ -652,13 +652,13 @@ func TestDecryptConfig(t *testing.T) {
 	mockResolver := MockSecretResolver{t: t, scenarios: []mockSecretScenario{
 		{
 			expectedData:   []byte{},
-			expectedOrigin: tpl.Digest(),
+			expectedOrigin: tpl.Name,
 			returnedData:   []byte{},
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param1: ENC[foo]\n"),
-			expectedOrigin: tpl.Digest(),
+			expectedOrigin: tpl.Name,
 			returnedData:   []byte("param1: foo\n"),
 			returnedError:  nil,
 		},
@@ -738,13 +738,13 @@ func TestRefreshConfig(t *testing.T) {
 			mockResolver := MockSecretResolver{t: t, scenarios: []mockSecretScenario{
 				{
 					expectedData:   []byte{},
-					expectedOrigin: tpl.Digest(),
+					expectedOrigin: tpl.Name,
 					returnedData:   []byte{},
 					returnedError:  nil,
 				},
 				{
 					expectedData:   []byte("foo: ENC[bar]\n"),
-					expectedOrigin: tpl.Digest(),
+					expectedOrigin: tpl.Name + "/0",
 					returnedData:   []byte("foo: bar_resolved"),
 					returnedError:  nil,
 				},
@@ -773,7 +773,7 @@ func TestRefreshConfig(t *testing.T) {
 			// rotate secret
 			mockResolver.scenarios[1] = mockSecretScenario{
 				expectedData:   []byte("foo: ENC[bar]\n"),
-				expectedOrigin: tpl.Digest(),
+				expectedOrigin: tpl.Name + "/0",
 				returnedData:   []byte("foo: " + tt.newValue),
 				returnedError:  nil,
 			}
@@ -821,13 +821,13 @@ func TestProcessClusterCheckConfigWithSecrets(t *testing.T) {
 	mockResolver := MockSecretResolver{t: t, scenarios: []mockSecretScenario{
 		{
 			expectedData:   []byte("foo: ENC[bar]"),
-			expectedOrigin: tpl.Digest(),
+			expectedOrigin: tpl.Name + "/0",
 			returnedData:   []byte("foo: barDecoded"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte{},
-			expectedOrigin: tpl.Digest(),
+			expectedOrigin: tpl.Name,
 			returnedData:   []byte{},
 			returnedError:  nil,
 		},
