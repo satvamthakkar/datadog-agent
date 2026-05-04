@@ -8,6 +8,7 @@ package spot
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -85,11 +86,15 @@ func (s *spotSchedulingSuite) TestDeploymentFallbackWhenSpotUnavailable() {
 	// 1. Set spot-disabled-until annotation on Deployment
 	// 2. Evict pending spot pods
 	// 3. New pods from ReplicaSet go to on-demand node
+	var lastDisabledUntil atomic.Pointer[string]
 	s.eventually(func(c *assert.CollectT) {
 		deploy, err := s.kubeClient.AppsV1().Deployments(s.testNamespace).Get(s.T().Context(), "nginx", metav1.GetOptions{})
 		require.NoError(c, err)
 		require.NotEmpty(c, deploy.Annotations[spotDisabledUntilAnnotation],
 			"spot-disabled-until annotation should be set on Deployment after fallback")
+
+		ts := deploy.Annotations[spotDisabledUntilAnnotation]
+		lastDisabledUntil.Store(&ts)
 	})
 
 	// Wait for all 10 pods to run on on-demand (fallback mode).
@@ -104,13 +109,23 @@ func (s *spotSchedulingSuite) TestDeploymentFallbackWhenSpotUnavailable() {
 	s.uncordonNode(s.spotNode)
 
 	const spotPods = 6 // 60% of 10 replicas
+	fallbackCount := 1
 	s.EventuallyWithT(func(c *assert.CollectT) {
+		deploy, err := s.kubeClient.AppsV1().Deployments(s.testNamespace).Get(s.T().Context(), "nginx", metav1.GetOptions{})
+		require.NoError(c, err)
+		disabledUntil := deploy.Annotations[spotDisabledUntilAnnotation]
+		if curr := lastDisabledUntil.Load(); disabledUntil != "" && (curr == nil || disabledUntil != *curr) {
+			fallbackCount++
+			lastDisabledUntil.Store(&disabledUntil)
+			s.T().Logf("spot fallback #%d, disabled until: %s", fallbackCount, disabledUntil)
+		}
+
 		pods := s.listPods("deployment=nginx")
 
 		require.Len(c, pods, 10)
 		s.expectRunningSpot(c, pods, spotPods)
 		s.expectRunningOnDemand(c, pods, 4)
-	}, fallbackDuration+rebalancingTimeout(spotPods), 5*time.Second)
+	}, 2*fallbackDuration+rebalancingTimeout(spotPods), 5*time.Second)
 }
 
 // TestDeploymentOptIn: create a deployment without the spot label, wait for all pods
