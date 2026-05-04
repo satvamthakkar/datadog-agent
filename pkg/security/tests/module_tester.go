@@ -924,11 +924,16 @@ func setupOptionalDatadogConfigWithDir(t testing.TB, configDir, configFile strin
 	return nil
 }
 
+// fakeMsgQueueSize is the maximum number of messages buffered per rule ID by the
+// fakeMsgSender. When the queue is full, the oldest message is dropped to make
+// room for the newest one.
+const fakeMsgQueueSize = 5
+
 type fakeMsgSender struct {
 	sync.Mutex
 
 	testMod *testModule
-	msgs    map[eval.RuleID]*api.SecurityEventMessage
+	msgs    map[eval.RuleID][]*api.SecurityEventMessage
 }
 
 func (fs *fakeMsgSender) Send(msg *api.SecurityEventMessage, _ func(*api.SecurityEventMessage)) {
@@ -943,29 +948,47 @@ func (fs *fakeMsgSender) Send(msg *api.SecurityEventMessage, _ func(*api.Securit
 		fs.testMod.t.Fatal(err)
 	}
 
-	fs.msgs[msgStruct.AgentContext.RuleID] = msg
+	ruleID := msgStruct.AgentContext.RuleID
+	queue := fs.msgs[ruleID]
+	if len(queue) >= fakeMsgQueueSize {
+		queue = queue[1:]
+	}
+	fs.msgs[ruleID] = append(queue, msg)
 }
 
 func (fs *fakeMsgSender) SendTelemetry(statsd.ClientInterface) {}
 
+// getMsg returns the oldest queued message for the given rule ID (FIFO) and
+// removes it from the queue. Subsequent calls return the next message. Returns
+// nil when the queue is empty.
 func (fs *fakeMsgSender) getMsg(ruleID eval.RuleID) *api.SecurityEventMessage {
 	fs.Lock()
 	defer fs.Unlock()
 
-	return fs.msgs[ruleID]
+	queue := fs.msgs[ruleID]
+	if len(queue) == 0 {
+		return nil
+	}
+	msg := queue[0]
+	if len(queue) == 1 {
+		delete(fs.msgs, ruleID)
+	} else {
+		fs.msgs[ruleID] = queue[1:]
+	}
+	return msg
 }
 
 func (fs *fakeMsgSender) flush() {
 	fs.Lock()
 	defer fs.Unlock()
 
-	fs.msgs = make(map[eval.RuleID]*api.SecurityEventMessage)
+	fs.msgs = make(map[eval.RuleID][]*api.SecurityEventMessage)
 }
 
 func newFakeMsgSender(testMod *testModule) *fakeMsgSender {
 	return &fakeMsgSender{
 		testMod: testMod,
-		msgs:    make(map[eval.RuleID]*api.SecurityEventMessage),
+		msgs:    make(map[eval.RuleID][]*api.SecurityEventMessage),
 	}
 }
 

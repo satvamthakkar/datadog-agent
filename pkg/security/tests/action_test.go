@@ -1804,10 +1804,6 @@ func TestRemediationCustomEventNotTriggered(t *testing.T) {
 	defer test.Close()
 
 	t.Run("not-triggered-sent-at-startup", func(t *testing.T) {
-		// Allow any in-flight remediation_status from the previous subtest to be delivered, then clear again.
-		time.Sleep(2000 * time.Millisecond)
-		test.msgSender.flush()
-
 		newRuleDefs := []*rules.RuleDefinition{remediationNotTriggeredRule}
 		if err := setTestPolicy(commonCfgDir, nil, newRuleDefs); err != nil {
 			t.Fatalf("failed to set new policy: %v", err)
