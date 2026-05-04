@@ -64,6 +64,7 @@ import (
 	logssourcefx "github.com/DataDog/datadog-agent/comp/anomalydetection/logssource/fx"
 	observerfx "github.com/DataDog/datadog-agent/comp/anomalydetection/observer/fx"
 	recorderfx "github.com/DataDog/datadog-agent/comp/anomalydetection/recorder/fx"
+	reporterfx "github.com/DataDog/datadog-agent/comp/anomalydetection/reporter/fx"
 	"github.com/DataDog/datadog-agent/comp/api/api/apiimpl"
 	internalAPI "github.com/DataDog/datadog-agent/comp/api/api/def"
 	commonendpoints "github.com/DataDog/datadog-agent/comp/api/commonendpoints/fx"
@@ -508,6 +509,7 @@ func getSharedFxOption() fx.Option {
 		logs.Bundle(),
 		observerfx.Module(),
 		logssourcefx.Module(),
+		reporterfx.Module(),
 		langDetectionClimpl.Module(),
 		metadata.Bundle(),
 		orchestratorForwarderImpl.Module(orchestratorForwarderImpl.NewDefaultParams()),

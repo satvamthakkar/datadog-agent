@@ -5,6 +5,9 @@ Dockerfiles/dogstatsd/alpine/static/
 vendor/
 .vendor-new/
 bin/
+
+# q-branch built binaries
+/anomalydetection-testbench
 /dev/
 /site/
 __pycache__
