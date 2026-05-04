@@ -281,7 +281,7 @@ new-e2e-containers-k8s-latest:
     TARGETS: ./tests/containers
     TEAM: container-integrations
     ON_NIGHTLY_FIPS: "true"
-    EXTRA_PARAMS: "--run TestKindSuite -c ddinfra:kubernetesVersion=v1.35.1@sha256:05d7bcdefbda08b4e038f644c4df690cdac3fba8b06f8289f30e10026720a1ab"
+    EXTRA_PARAMS: "--run TestKindSuite -c ddinfra:kubernetesVersion=v1.36.0-rc.1@sha256:9dfc1d552f35f769e04f919d537ad038c327b05a3c81bc1ada965e707fd6ea38"
 
 new-e2e-containers-eks-init:
   stage: e2e_init
