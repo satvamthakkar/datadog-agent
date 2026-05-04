@@ -115,25 +115,25 @@ func makeScenariosForConfig(conf integration.Config) []mockSecretScenario {
 	return []mockSecretScenario{
 		{
 			expectedData:   []byte("param1: ENC[foo]"),
-			expectedOrigin: conf.Name, // init_config uses the check name
+			expectedOrigin: conf.Digest(),
 			returnedData:   []byte("param1: foo"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param2: ENC[bar]"),
-			expectedOrigin: conf.Name + "/0", // first (only) instance uses a temp per-index origin
+			expectedOrigin: conf.Digest(),
 			returnedData:   []byte("param2: bar"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param3: ENC[met]"),
-			expectedOrigin: conf.Name, // metrics uses the check name
+			expectedOrigin: conf.Digest(),
 			returnedData:   []byte("param3: met"),
 			returnedError:  nil,
 		},
 		{
 			expectedData:   []byte("param4: ENC[log]"),
-			expectedOrigin: conf.Name, // logs uses the check name
+			expectedOrigin: conf.Digest(),
 			returnedData:   []byte("param4: log"),
 			returnedError:  nil,
 		},
@@ -146,7 +146,7 @@ var makeSharedScenarios = func() []mockSecretScenario {
 
 func TestSecretResolve(t *testing.T) {
 	mockResolve := &MockSecretResolver{t: t, scenarios: makeSharedScenarios()}
-	newConfig, err := decryptConfig(sharedTpl, mockResolve)
+	newConfig, err := decryptConfig(sharedTpl, mockResolve, sharedTpl.Digest())
 	require.NoError(t, err)
 
 	assert.NotEqual(t, newConfig.Instances, sharedTpl.Instances)
@@ -172,15 +172,15 @@ func TestDecryptConfigInstanceFailureSkipsInstance(t *testing.T) {
 	mockResolve := &MockSecretResolver{
 		t: t,
 		scenarios: []mockSecretScenario{
-			{expectedData: []byte("param1: ENC[foo]"), expectedOrigin: tpl.Name, returnedData: []byte("param1: foo")},
-			{expectedData: []byte("bad: ENC[unknown]"), expectedOrigin: tpl.Name + "/0", returnedData: []byte("bad: ENC[unknown]"), returnedError: errors.New("unknown handle")},
-			{expectedData: []byte("good: ENC[bar]"), expectedOrigin: tpl.Name + "/1", returnedData: []byte("good: bar")},
-			{expectedData: []byte("param3: ENC[met]"), expectedOrigin: tpl.Name, returnedData: []byte("param3: met")},
-			{expectedData: []byte("param4: ENC[log]"), expectedOrigin: tpl.Name, returnedData: []byte("param4: log")},
+			{expectedData: []byte("param1: ENC[foo]"), expectedOrigin: tpl.Digest(), returnedData: []byte("param1: foo")},
+			{expectedData: []byte("bad: ENC[unknown]"), expectedOrigin: tpl.Digest(), returnedData: []byte("bad: ENC[unknown]"), returnedError: errors.New("unknown handle")},
+			{expectedData: []byte("good: ENC[bar]"), expectedOrigin: tpl.Digest(), returnedData: []byte("good: bar")},
+			{expectedData: []byte("param3: ENC[met]"), expectedOrigin: tpl.Digest(), returnedData: []byte("param3: met")},
+			{expectedData: []byte("param4: ENC[log]"), expectedOrigin: tpl.Digest(), returnedData: []byte("param4: log")},
 		},
 	}
 
-	newConfig, err := decryptConfig(tpl, mockResolve)
+	newConfig, err := decryptConfig(tpl, mockResolve, tpl.Digest())
 
 	// error is propagated so the caller knows an instance was dropped
 	require.Error(t, err)
@@ -206,14 +206,14 @@ func TestDecryptConfigInitConfigFailureDropsAll(t *testing.T) {
 		scenarios: []mockSecretScenario{
 			{
 				expectedData:   []byte("param1: ENC[foo]"),
-				expectedOrigin: sharedTpl.Name, // init_config uses check name
+				expectedOrigin: sharedTpl.Digest(),
 				returnedData:   []byte("param1: ENC[foo]"),
 				returnedError:  errors.New("could not resolve secret handle(s)"),
 			},
 		},
 	}
 
-	_, err := decryptConfig(sharedTpl, mockResolve)
+	_, err := decryptConfig(sharedTpl, mockResolve, sharedTpl.Digest())
 
 	// error propagated, and no further Resolve calls were made (instances, metrics, logs skipped)
 	require.Error(t, err)
@@ -228,7 +228,7 @@ func TestSkipSecretResolve(t *testing.T) {
 	cfg.SetWithoutSource("secret_backend_skip_checks", true)
 	defer cfg.SetWithoutSource("secret_backend_skip_checks", false)
 
-	c, err := decryptConfig(sharedTpl, mockResolve)
+	c, err := decryptConfig(sharedTpl, mockResolve, sharedTpl.Digest())
 	require.NoError(t, err)
 
 	assert.Equal(t, sharedTpl.Instances, c.Instances)

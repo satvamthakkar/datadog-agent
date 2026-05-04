@@ -8,7 +8,6 @@ package autodiscoveryimpl
 import (
 	"fmt"
 	"maps"
-	"strconv"
 	"sync"
 
 	healthplatformpayload "github.com/DataDog/agent-payload/v5/healthplatform"
@@ -191,17 +190,6 @@ func (cm *reconcilingConfigManager) processDelService(svc listeners.Service) int
 	return cm.applyChanges(changes)
 }
 
-// renameInstanceOrigins renames the temporary per-index secret origins registered by
-// decryptConfig (e.g. "http_check/0") to the actual check instance IDs so that
-// 'datadog-agent secret' output matches 'agent status collector' instance IDs.
-func renameInstanceOrigins(secretResolver secrets.Component, conf integration.Config) {
-	for i, instance := range conf.Instances {
-		tempOrigin := conf.Name + "/" + strconv.Itoa(i)
-		checkID := checkid.BuildID(conf.Name, conf.FastDigest(), instance, conf.InitConfig)
-		secretResolver.RenameOrigin(tempOrigin, string(checkID))
-	}
-}
-
 // processNewConfig implements configManager#processNewConfig.
 func (cm *reconcilingConfigManager) processNewConfig(config integration.Config) (integration.ConfigChanges, map[checkid.ID]checkid.ID) {
 	cm.m.Lock()
@@ -236,7 +224,7 @@ func (cm *reconcilingConfigManager) processNewConfig(config integration.Config) 
 		}
 	} else {
 		// Secrets always need to be resolved (done in reconcileService if template)
-		decryptedConfig, err := decryptConfig(config, cm.secretResolver)
+		decryptedConfig, err := decryptConfig(config, cm.secretResolver, digest)
 		if err != nil {
 			if len(decryptedConfig.Instances) == 0 {
 				log.Errorf("Unable to resolve secrets for config '%s', dropping check configuration, err: %s", config.Name, err.Error())
@@ -244,8 +232,6 @@ func (cm *reconcilingConfigManager) processNewConfig(config integration.Config) 
 			}
 			log.Warnf("Unable to resolve secrets for some instances of config '%s', dropping instances that failed to decrypt, err: %s", config.Name, err.Error())
 		}
-		renameInstanceOrigins(cm.secretResolver, decryptedConfig)
-
 		// Instances of the decrypted config change their ID when secrets are
 		// resolved.
 		// We're only interested in cluster checks because the change of ID only
@@ -283,7 +269,7 @@ func (cm *reconcilingConfigManager) processDelConfigs(configs []integration.Conf
 		delete(cm.activeConfigs, digest)
 
 		// Remove all resolved secrets for this config
-		cm.secretResolver.RemoveOrigin(config.Name)
+		cm.secretResolver.RemoveOrigin(digest)
 
 		var changes integration.ConfigChanges
 		if config.IsTemplate() {
@@ -303,16 +289,9 @@ func (cm *reconcilingConfigManager) processDelConfigs(configs []integration.Conf
 		} else {
 			// Secrets need to be resolved before being unscheduled as otherwise
 			// the computed hashes can be different from the ones computed at schedule time.
-			config, err := decryptConfig(config, cm.secretResolver)
+			config, err := decryptConfig(config, cm.secretResolver, digest)
 			if err != nil {
 				log.Errorf("Unable to resolve secrets for config '%s', check may not be unscheduled properly, err: %s", config.Name, err.Error())
-			}
-			// Remove per-instance origins registered as check IDs when the config was scheduled.
-			for i, instance := range config.Instances {
-				// Remove any un-renamed temp origin in case decryption failed earlier.
-				cm.secretResolver.RemoveOrigin(config.Name + "/" + strconv.Itoa(i))
-				checkID := checkid.BuildID(config.Name, config.FastDigest(), instance, config.InitConfig)
-				cm.secretResolver.RemoveOrigin(string(checkID))
 			}
 
 			changes.UnscheduleConfig(config)
@@ -439,13 +418,12 @@ func (cm *reconcilingConfigManager) resolveTemplateForService(tpl integration.Co
 		cm.reportTemplateResolutionFailure(tpl, svc, err)
 		return tpl, false
 	}
-	resolvedConfig, err := decryptConfig(config, cm.secretResolver)
+	resolvedConfig, err := decryptConfig(config, cm.secretResolver, tpl.Digest())
 	if err != nil {
 		msg := fmt.Sprintf("error decrypting secrets in config %s for service %s: %v", config.Name, svc.GetServiceID(), err)
 		errorStats.setResolveWarning(tpl.Name, msg)
 		return config, false
 	}
-	renameInstanceOrigins(cm.secretResolver, resolvedConfig)
 	errorStats.removeResolveWarnings(tpl.Name)
 	cm.clearTemplateResolutionFailure(tpl, svc)
 	return resolvedConfig, true
